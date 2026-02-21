@@ -13,16 +13,23 @@ public sealed class ResourceGatherTask : IBotTask
 {
     private static readonly string[] GatherTemplates =
     {
-        "gather_button.png",
-        "gather_button_alt.png",
-        "gather_button_popup.png"
+        "gather_button.png"
     };
 
     private static readonly string[] MarchTemplates =
     {
-        "march_button.png",
-        "march_button_alt.png",
-        "march_start_button.png"
+        "march_button.png"
+    };
+
+    private static readonly string[] TilePopupTemplates =
+    {
+        "transfer_button.png",
+        "occupy_button.png"
+    };
+
+    private static readonly string[] PopupCloseTemplates =
+    {
+        "popup_close.png"
     };
 
     private static readonly double[] ActionThresholds = { 0.80, 0.72, 0.64, 0.56, 0.48, 0.40 };
@@ -113,6 +120,14 @@ public sealed class ResourceGatherTask : IBotTask
                             cancellationToken);
                         break;
 
+                    case GameState.TilePopup:
+                        await ExecuteWithRetryAsync(
+                            "Recover from tile popup",
+                            ct => DismissTilePopupAsync(context, ct),
+                            3,
+                            cancellationToken);
+                        break;
+
                     case GameState.MarchScreen:
                         await ExecuteWithRetryAsync(
                             "Recover from march screen",
@@ -189,11 +204,7 @@ public sealed class ResourceGatherTask : IBotTask
             return false;
         }
 
-        await TapWithOffsetAsync(resourceTile.CenterX, resourceTile.CenterY, cancellationToken);
-        _logger.LogInformation("Resource tile clicked.");
-
-        await RandomDelayAsync(500, 1200, cancellationToken);
-        if (!await WaitForStateAsync(GameState.ResourcePopup, context, TimeSpan.FromSeconds(8), cancellationToken))
+        if (!await TryOpenResourcePopupAsync(context, resourceTile, cancellationToken))
         {
             _logger.LogWarning("Resource popup did not appear after tile click.");
             return false;
@@ -414,6 +425,97 @@ public sealed class ResourceGatherTask : IBotTask
         }
 
         return best;
+    }
+
+    private async Task<bool> TryOpenResourcePopupAsync(
+        BotExecutionContext context,
+        DetectionResult resourceTile,
+        CancellationToken cancellationToken)
+    {
+        // Resource hitboxes on world map are small; probe nearby offsets around best match center.
+        var probeOffsets = new (int Dx, int Dy)[]
+        {
+            (0, 0), (18, 0), (-18, 0), (0, 18), (0, -18),
+            (28, 12), (-28, 12), (28, -12), (-28, -12),
+            (0, 30), (0, -30)
+        };
+
+        foreach (var (dx, dy) in probeOffsets)
+        {
+            var x = resourceTile.CenterX + dx;
+            var y = resourceTile.CenterY + dy;
+
+            await TapWithOffsetAsync(x, y, cancellationToken);
+            _logger.LogInformation(
+                "Resource probe tap at ({X},{Y}) base=({BaseX},{BaseY}) confidence={Confidence:F3}",
+                x, y, resourceTile.CenterX, resourceTile.CenterY, resourceTile.Confidence);
+
+            await RandomDelayAsync(320, 680, cancellationToken);
+
+            var popupState = await WaitForPopupStateAsync(context, TimeSpan.FromSeconds(2.8), cancellationToken);
+            if (popupState == GameState.ResourcePopup)
+            {
+                _logger.LogInformation("Resource popup opened after probe tap.");
+                return true;
+            }
+
+            if (popupState == GameState.TilePopup)
+            {
+                _logger.LogInformation("Tile popup opened after probe tap; dismissing and retrying next probe.");
+                _ = await DismissTilePopupAsync(context, cancellationToken);
+                await RandomDelayAsync(280, 520, cancellationToken);
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<GameState> WaitForPopupStateAsync(
+        BotExecutionContext context,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        while (DateTimeOffset.UtcNow - started < timeout && !cancellationToken.IsCancellationRequested)
+        {
+            var state = await ResolveStateWithFreshScreenshotAsync(context, cancellationToken);
+            if (state == GameState.ResourcePopup || state == GameState.TilePopup)
+            {
+                return state;
+            }
+
+            await RandomDelayAsync(180, 420, cancellationToken);
+        }
+
+        return GameState.Unknown;
+    }
+
+    private async Task<bool> DismissTilePopupAsync(BotExecutionContext context, CancellationToken cancellationToken)
+    {
+        var close = await FindBestTemplateAsync(context, PopupCloseTemplates, ActionThresholds, cancellationToken);
+        if (close.IsMatch)
+        {
+            await TapWithOffsetAsync(close.CenterX, close.CenterY, cancellationToken);
+            _logger.LogInformation("Dismissed popup using close button.");
+            await RandomDelayAsync(250, 550, cancellationToken);
+            return true;
+        }
+
+        var tileButton = await FindBestTemplateAsync(context, TilePopupTemplates, ActionThresholds, cancellationToken);
+        if (!tileButton.IsMatch)
+        {
+            _logger.LogWarning("Tile popup detected but no close/tile button template matched for dismissal.");
+            return false;
+        }
+
+        var (width, height) = await _emulatorController.GetResolutionAsync(cancellationToken);
+        var tapX = Math.Clamp(tileButton.CenterX - (int)(width * 0.24), 10, width - 10);
+        var tapY = Math.Clamp(tileButton.CenterY - (int)(height * 0.18), 10, height - 10);
+
+        await TapWithOffsetAsync(tapX, tapY, cancellationToken);
+        _logger.LogInformation("Dismissed tile popup by tapping outside panel near ({X},{Y}).", tapX, tapY);
+        await RandomDelayAsync(260, 620, cancellationToken);
+        return true;
     }
 
     private async Task<bool> ExecuteWithRetryAsync(

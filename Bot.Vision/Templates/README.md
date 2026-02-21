@@ -19,6 +19,9 @@ Optional fallback templates (recommended):
 - `gather_button_popup.png`
 - `march_button_alt.png`
 - `march_start_button.png`
+- `transfer_button.png` (tile popup button)
+- `occupy_button.png` (tile popup button)
+- `popup_close.png` (top-right popup close)
 
 Notes:
 - Use clean emulator screenshots for crops.

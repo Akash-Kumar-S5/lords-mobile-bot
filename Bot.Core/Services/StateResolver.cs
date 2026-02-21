@@ -21,16 +21,18 @@ public sealed class StateResolver : IStateResolver
 
     private static readonly string[] GatherTemplates =
     {
-        "gather_button.png",
-        "gather_button_alt.png",
-        "gather_button_popup.png"
+        "gather_button.png"
+    };
+
+    private static readonly string[] TilePopupTemplates =
+    {
+        "transfer_button.png",
+        "occupy_button.png"
     };
 
     private static readonly string[] MarchTemplates =
     {
-        "march_button.png",
-        "march_button_alt.png",
-        "march_start_button.png"
+        "march_button.png"
     };
 
     private readonly IImageDetector _imageDetector;
@@ -52,6 +54,11 @@ public sealed class StateResolver : IStateResolver
         if (await IsResourcePopupAsync(context, cancellationToken))
         {
             return GameState.ResourcePopup;
+        }
+
+        if (await IsTilePopupAsync(context, cancellationToken))
+        {
+            return GameState.TilePopup;
         }
 
         if (await IsCityViewAsync(context, cancellationToken))
@@ -76,6 +83,12 @@ public sealed class StateResolver : IStateResolver
     public async Task<bool> IsWorldMapAsync(BotExecutionContext context, CancellationToken cancellationToken = default)
     {
         var detection = await DetectAnyAsync(context, ResourceTemplates, 0.55, cancellationToken);
+        return detection.IsMatch;
+    }
+
+    public async Task<bool> IsTilePopupAsync(BotExecutionContext context, CancellationToken cancellationToken = default)
+    {
+        var detection = await DetectAnyAsync(context, TilePopupTemplates, 0.40, cancellationToken);
         return detection.IsMatch;
     }
 

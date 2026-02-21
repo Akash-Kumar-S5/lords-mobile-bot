@@ -149,7 +149,7 @@ public sealed class MapNavigator : IMapNavigator
 
     private async Task<bool> TryClickMapIconAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
-        var templates = new[] { "map_button.png", "map_button_alt.png", "map_icon.png" };
+        var templates = new[] { "map_button.png" };
         var thresholds = new[] { 0.80, 0.72, 0.64, 0.56, 0.48 };
 
         foreach (var template in templates)
