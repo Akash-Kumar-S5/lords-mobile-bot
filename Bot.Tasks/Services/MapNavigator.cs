@@ -16,7 +16,8 @@ public sealed class MapNavigator : IMapNavigator
         "resource_stone.png",
         "resource_wood.png",
         "resource_ore.png",
-        "resource_food.png"
+        "resource_food.png",
+        "resource_rune.png"
     };
 
     private static readonly double[] ResourceThresholds = { 0.76, 0.68, 0.60, 0.52, 0.45 };

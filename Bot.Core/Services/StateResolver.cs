@@ -15,7 +15,8 @@ public sealed class StateResolver : IStateResolver
         "resource_stone.png",
         "resource_wood.png",
         "resource_ore.png",
-        "resource_food.png"
+        "resource_food.png",
+        "resource_rune.png"
     };
 
     private static readonly string[] GatherTemplates =
