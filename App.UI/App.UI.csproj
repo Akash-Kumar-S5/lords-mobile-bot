@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <AppxPackage>false</AppxPackage>
+    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
+    <GenerateProjectPriFile>false</GenerateProjectPriFile>
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <AppxGeneratePrisForPortableLibrariesEnabled>false</AppxGeneratePrisForPortableLibrariesEnabled>
+    <IncludeProjectPriFile>false</IncludeProjectPriFile>
+    <AppxMSBuildToolsPath Condition="'$(WINUI_APPX_TOOLS_PATH)' != '' and Exists('$(WINUI_APPX_TOOLS_PATH)\\Microsoft.Build.AppxPackage.dll')">$(WINUI_APPX_TOOLS_PATH)\</AppxMSBuildToolsPath>
+    <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' and Exists('D:\\VS\\Extract\\WindowsBuild\\Contents\\MSBuild\\Microsoft\\VisualStudio\\v17.0\\AppxPackage\\Microsoft.Build.AppxPackage.dll')">D:\VS\Extract\WindowsBuild\Contents\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250205002" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Bot.Core\Bot.Core.csproj" />
+    <ProjectReference Include="..\Bot.Infrastructure\Bot.Infrastructure.csproj" />
+    <ProjectReference Include="..\Bot.Tasks\Bot.Tasks.csproj" />
+    <ProjectReference Include="..\Bot.Emulator\Bot.Emulator.csproj" />
+    <ProjectReference Include="..\Bot.Vision\Bot.Vision.csproj" />
+  </ItemGroup>
+</Project>
