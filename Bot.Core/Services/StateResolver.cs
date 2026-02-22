@@ -32,7 +32,8 @@ public sealed class StateResolver : IStateResolver
 
     private static readonly string[] MarchTemplates =
     {
-        "march_button.png"
+        "lowest_tier_button.png",
+        "deploy_button.png"
     };
 
     private readonly IImageDetector _imageDetector;

@@ -10,7 +10,8 @@ public sealed class TemplateVerifier : ITemplateVerifier
         "map_button.png",
         "resource_tile.png",
         "gather_button.png",
-        "march_button.png"
+        "lowest_tier_button.png",
+        "deploy_button.png"
     };
 
     private readonly ILogger<TemplateVerifier> _logger;

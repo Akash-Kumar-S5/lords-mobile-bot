@@ -1,5 +1,6 @@
 using App.UI.Commands;
 using Bot.Core.Interfaces;
+using Bot.Infrastructure.Configuration;
 using Bot.Infrastructure.Logging;
 using Bot.Tasks.Interfaces;
 using Microsoft.UI.Dispatching;
@@ -15,18 +16,23 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IBotEngine _botEngine;
     private readonly ITemplateVerifier _templateVerifier;
     private readonly ILogEventStream _logEventStream;
+    private readonly IRuntimeBotSettings _runtimeBotSettings;
     private readonly DispatcherQueue _dispatcherQueue;
     private string _statusText = "Stopped";
+    private string _maxArmyLimitText = "1";
 
     public MainViewModel(
         IBotEngine botEngine,
         ITemplateVerifier templateVerifier,
-        ILogEventStream logEventStream)
+        ILogEventStream logEventStream,
+        IRuntimeBotSettings runtimeBotSettings)
     {
         _botEngine = botEngine;
         _templateVerifier = templateVerifier;
         _logEventStream = logEventStream;
+        _runtimeBotSettings = runtimeBotSettings;
         _dispatcherQueue = DispatcherQueue.GetForCurrentThread() ?? throw new InvalidOperationException("UI dispatcher unavailable.");
+        _maxArmyLimitText = _runtimeBotSettings.MaxActiveMarches.ToString();
 
         LogEntries = new ObservableCollection<string>(_logEventStream.Snapshot());
         _logEventStream.LogAppended += OnLogAppended;
@@ -56,8 +62,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public string MaxArmyLimitText
+    {
+        get => _maxArmyLimitText;
+        set
+        {
+            if (_maxArmyLimitText == value)
+            {
+                return;
+            }
+
+            _maxArmyLimitText = value;
+            OnPropertyChanged();
+        }
+    }
+
     private async Task StartAsync()
     {
+        if (!int.TryParse(MaxArmyLimitText, out var maxArmyLimit) || maxArmyLimit < 1)
+        {
+            StatusText = "Invalid Max Army";
+            RefreshCommands();
+            return;
+        }
+
+        _runtimeBotSettings.MaxActiveMarches = maxArmyLimit;
+
         var verify = await _templateVerifier.VerifyAsync();
         if (!verify.IsValid)
         {

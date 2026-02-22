@@ -3,6 +3,7 @@ using Bot.Core.Interfaces;
 using Bot.Core.Services;
 using Bot.Emulator.Interfaces;
 using Bot.Emulator.Services;
+using Bot.Infrastructure.Configuration;
 using Bot.Infrastructure.DependencyInjection;
 using Bot.Tasks.Interfaces;
 using Bot.Tasks.Services;
@@ -35,10 +36,12 @@ public partial class App : Application
         var services = new ServiceCollection();
 
         services.AddInfrastructure();
+        services.AddSingleton<IRuntimeBotSettings, RuntimeBotSettings>();
 
         services.AddSingleton<IDeviceManager, DeviceManager>();
         services.AddSingleton<IEmulatorController, AdbService>();
         services.AddSingleton<IImageDetector, ImageDetector>();
+        services.AddSingleton<IOcrReader, TesseractOcrReader>();
         services.AddSingleton<IMapNavigator, MapNavigator>();
         services.AddSingleton<ITemplateVerifier, TemplateVerifier>();
         services.AddSingleton<IBotTask, ResourceGatherTask>();

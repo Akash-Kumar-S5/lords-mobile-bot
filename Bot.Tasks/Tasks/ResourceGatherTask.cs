@@ -2,6 +2,7 @@ using Bot.Core.Enums;
 using Bot.Core.Interfaces;
 using Bot.Core.Models;
 using Bot.Emulator.Interfaces;
+using Bot.Infrastructure.Configuration;
 using Bot.Tasks.Interfaces;
 using Bot.Vision.Interfaces;
 using Bot.Vision.Models;
@@ -16,9 +17,14 @@ public sealed class ResourceGatherTask : IBotTask
         "gather_button.png"
     };
 
-    private static readonly string[] MarchTemplates =
+    private static readonly string[] LowestTierTemplates =
     {
-        "march_button.png"
+        "lowest_tier_button.png"
+    };
+
+    private static readonly string[] DeployTemplates =
+    {
+        "deploy_button.png"
     };
 
     private static readonly string[] TilePopupTemplates =
@@ -33,14 +39,25 @@ public sealed class ResourceGatherTask : IBotTask
     };
 
     private static readonly double[] ActionThresholds = { 0.80, 0.72, 0.64, 0.56, 0.48, 0.40 };
+    private static readonly double[] MarchActionThresholds = { 0.72, 0.64, 0.56, 0.48, 0.40, 0.36, 0.32 };
+    private static readonly double[] ArmyIndicatorThresholds = { 0.85, 0.75, 0.65, 0.58, 0.52, 0.45, 0.38, 0.30 };
 
-    private const int StepTimeoutSeconds = 20;
+    private static readonly string[] ArmyIndicatorTemplates =
+    {
+        "army_indicator_icon.png",
+        "march_button.png"
+    };
+
+    private const int StepTimeoutSeconds = 45;
     private static readonly TimeSpan MarchSlotWaitTimeout = TimeSpan.FromMinutes(4);
+    private static readonly TimeSpan ArmyLimitRecheckInterval = TimeSpan.FromSeconds(10);
 
     private readonly IEmulatorController _emulatorController;
     private readonly IStateResolver _stateResolver;
     private readonly IMapNavigator _mapNavigator;
     private readonly IImageDetector _imageDetector;
+    private readonly IOcrReader _ocrReader;
+    private readonly IRuntimeBotSettings _runtimeBotSettings;
     private readonly ILogger<ResourceGatherTask> _logger;
     private readonly Random _random = Random.Shared;
 
@@ -49,12 +66,16 @@ public sealed class ResourceGatherTask : IBotTask
         IStateResolver stateResolver,
         IMapNavigator mapNavigator,
         IImageDetector imageDetector,
+        IOcrReader ocrReader,
+        IRuntimeBotSettings runtimeBotSettings,
         ILogger<ResourceGatherTask> logger)
     {
         _emulatorController = emulatorController;
         _stateResolver = stateResolver;
         _mapNavigator = mapNavigator;
         _imageDetector = imageDetector;
+        _ocrReader = ocrReader;
+        _runtimeBotSettings = runtimeBotSettings;
         _logger = logger;
     }
 
@@ -88,6 +109,17 @@ public sealed class ResourceGatherTask : IBotTask
                 var state = await ResolveStateWithFreshScreenshotAsync(context, cancellationToken)
                     .WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
                 _logger.LogInformation("Current state: {State}", state);
+
+                if (await IsAtArmyLimitAsync(context, cancellationToken))
+                {
+                    var limit = Math.Max(1, _runtimeBotSettings.MaxActiveMarches);
+                    _logger.LogInformation(
+                        "Max army limit reached (active marches >= {Limit}). Rechecking in {Seconds}s.",
+                        limit,
+                        ArmyLimitRecheckInterval.TotalSeconds);
+                    await Task.Delay(ArmyLimitRecheckInterval, cancellationToken);
+                    continue;
+                }
 
                 switch (state)
                 {
@@ -131,7 +163,7 @@ public sealed class ResourceGatherTask : IBotTask
                     case GameState.MarchScreen:
                         await ExecuteWithRetryAsync(
                             "Recover from march screen",
-                            ct => TryClickMarchAsync(context, ct),
+                            ct => TrySelectLowestTierAndDeployAsync(context, ct),
                             3,
                             cancellationToken);
                         break;
@@ -226,28 +258,130 @@ public sealed class ResourceGatherTask : IBotTask
         _logger.LogInformation("Clicked gather button.");
 
         await RandomDelayAsync(500, 1100, cancellationToken);
-        if (!await WaitForStateAsync(GameState.MarchScreen, context, TimeSpan.FromSeconds(8), cancellationToken))
+        _logger.LogInformation("Post-gather mode: focusing only on lowest tier and deploy buttons.");
+        if (!await WaitForMarchControlsAsync(context, TimeSpan.FromSeconds(12), cancellationToken))
         {
-            _logger.LogWarning("March screen did not appear.");
+            _logger.LogWarning("March controls did not appear after gather.");
             return false;
         }
 
-        return await TryClickMarchAsync(context, cancellationToken);
+        return await TrySelectLowestTierAndDeployAsync(context, cancellationToken);
     }
 
-    private async Task<bool> TryClickMarchAsync(BotExecutionContext context, CancellationToken cancellationToken)
+    private async Task<bool> TrySelectLowestTierAndDeployAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
-        var march = await FindBestTemplateAsync(context, MarchTemplates, ActionThresholds, cancellationToken);
-        if (!march.IsMatch)
+        var lowestTier = await FindBestTemplateAsync(context, LowestTierTemplates, MarchActionThresholds, cancellationToken);
+        if (!lowestTier.IsMatch)
         {
-            _logger.LogWarning("March button not found. March slots may be full.");
+            // Some screens may already have lowest tier selected; allow direct deploy fallback.
+            _logger.LogWarning("Lowest tier button not found on march screen. Trying deploy fallback.");
+        }
+        else
+        {
+            await TapWithOffsetAsync(lowestTier.CenterX, lowestTier.CenterY, cancellationToken);
+            _logger.LogInformation("Clicked lowest tier button.");
+            await RandomDelayAsync(420, 900, cancellationToken);
+        }
+
+        var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchActionThresholds, cancellationToken);
+        if (!deploy.IsMatch)
+        {
+            _logger.LogWarning("Deploy button not found after selecting lowest tier.");
             return false;
         }
 
-        await TapWithOffsetAsync(march.CenterX, march.CenterY, cancellationToken);
-        _logger.LogInformation("Clicked march button. Gather dispatched successfully.");
+        await TapWithOffsetAsync(deploy.CenterX, deploy.CenterY, cancellationToken);
+        _logger.LogInformation("Clicked deploy button. Gather dispatched successfully.");
         await RandomDelayAsync(450, 1100, cancellationToken);
         return true;
+    }
+
+    private async Task<bool> WaitForMarchControlsAsync(
+        BotExecutionContext context,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var started = DateTimeOffset.UtcNow;
+        while (DateTimeOffset.UtcNow - started < timeout && !cancellationToken.IsCancellationRequested)
+        {
+            var lowestTier = await FindBestTemplateAsync(context, LowestTierTemplates, MarchActionThresholds, cancellationToken);
+            if (lowestTier.IsMatch)
+            {
+                _logger.LogInformation("March controls ready: lowest tier detected.");
+                return true;
+            }
+
+            var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchActionThresholds, cancellationToken);
+            if (deploy.IsMatch)
+            {
+                _logger.LogInformation("March controls ready: deploy detected.");
+                return true;
+            }
+
+            await RandomDelayAsync(220, 520, cancellationToken);
+        }
+
+        return false;
+    }
+
+    private async Task<bool> IsAtArmyLimitAsync(BotExecutionContext context, CancellationToken cancellationToken)
+    {
+        var configuredLimit = Math.Max(1, _runtimeBotSettings.MaxActiveMarches);
+        var marchCount = await DetectActiveMarchCountAsync(context, cancellationToken);
+        if (marchCount is null)
+        {
+            _logger.LogInformation("March count icon missing or unreadable. Continuing resource collection.");
+            return false;
+        }
+
+        _logger.LogInformation(
+            "Detected active marches: {ActiveMarches}. Configured max army limit: {ConfiguredLimit}.",
+            marchCount.Value,
+            configuredLimit);
+
+        return marchCount.Value >= configuredLimit;
+    }
+
+    private async Task<int?> DetectActiveMarchCountAsync(BotExecutionContext context, CancellationToken cancellationToken)
+    {
+        context = await CaptureContextAsync(context, cancellationToken);
+
+        var indicator = await FindBestTemplateAsync(context, ArmyIndicatorTemplates, ArmyIndicatorThresholds, cancellationToken);
+        if (!indicator.IsMatch)
+        {
+            _logger.LogDebug("Army indicator icon not found for OCR.");
+            return null;
+        }
+
+        // OCR is intentionally restricted to the area above the indicator badge
+        // to avoid picking unrelated numbers elsewhere in the UI.
+        var rois = new (int Dx, int Dy, int W, int H)[]
+        {
+            (12, -56, 34, 22),
+            (16, -52, 38, 24),
+            (8, -50, 30, 20)
+        };
+
+        foreach (var (dx, dy, w, h) in rois)
+        {
+            var x = indicator.CenterX + dx;
+            var y = indicator.CenterY + dy;
+            var value = await _ocrReader.ReadIntegerAsync(context.ScreenshotPath, x, y, w, h, cancellationToken);
+            _logger.LogDebug(
+                "Army OCR probe roi=({X},{Y},{W},{H}) value={Value}",
+                x,
+                y,
+                w,
+                h,
+                value.HasValue ? value.Value.ToString() : "null");
+
+            if (value is >= 0 and <= 9)
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private async Task WaitUntilMarchSlotFreeAsync(BotExecutionContext context, CancellationToken cancellationToken)
@@ -295,8 +429,8 @@ public sealed class ResourceGatherTask : IBotTask
                         return false;
                     }
 
-                    var march = await FindBestTemplateAsync(context, MarchTemplates, ActionThresholds, ct);
-                    return march.IsMatch;
+                    var deploy = await FindBestTemplateAsync(context, DeployTemplates, ActionThresholds, ct);
+                    return deploy.IsMatch;
                 },
                 1,
                 cancellationToken);
