@@ -22,10 +22,7 @@ public sealed class MapNavigator : IMapNavigator
     };
 
     private static readonly double[] ResourceThresholds = { 0.76, 0.68, 0.60, 0.52, 0.45 };
-    private static readonly bool SaveClickDebug = !string.Equals(
-        Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
-        "0",
-        StringComparison.OrdinalIgnoreCase);
+    private static readonly bool SaveClickDebug = false;
 
     private readonly IEmulatorController _emulatorController;
     private readonly IImageDetector _imageDetector;

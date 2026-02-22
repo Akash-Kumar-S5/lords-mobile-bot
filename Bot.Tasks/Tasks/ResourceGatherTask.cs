@@ -66,10 +66,7 @@ public sealed class ResourceGatherTask : IBotTask
         Environment.GetEnvironmentVariable("BOT_SAVE_MARCH_DEBUG_ALWAYS"),
         "1",
         StringComparison.OrdinalIgnoreCase);
-    private static readonly bool SaveClickDebug = !string.Equals(
-        Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
-        "0",
-        StringComparison.OrdinalIgnoreCase);
+    private static readonly bool SaveClickDebug = false;
 
     private const int StepTimeoutSeconds = 45;
     private static readonly TimeSpan MarchSlotWaitTimeout = TimeSpan.FromMinutes(4);
@@ -660,36 +657,6 @@ public sealed class ResourceGatherTask : IBotTask
                 return;
             }
 
-            var snapshot = _lastMarchSnapshot;
-            if (snapshot is not null)
-            {
-                var roi = new Rect(snapshot.RoiX, snapshot.RoiY, snapshot.RoiW, snapshot.RoiH);
-                Cv2.Rectangle(screenshot, roi, new Scalar(0, 255, 255), 2);
-                Cv2.Circle(
-                    screenshot,
-                    new Point(snapshot.DeployAnchor.CenterX, snapshot.DeployAnchor.CenterY),
-                    10,
-                    new Scalar(255, 128, 0),
-                    3);
-                Cv2.Circle(
-                    screenshot,
-                    new Point(snapshot.BestClearCandidate.CenterX, snapshot.BestClearCandidate.CenterY),
-                    10,
-                    new Scalar(0, 0, 255),
-                    3);
-
-                var label = $"clear={snapshot.BestClearCandidate.Confidence:F3} t={snapshot.Threshold:F2} tpl={snapshot.TemplateName}";
-                var labelY = Math.Max(24, snapshot.RoiY - 10);
-                Cv2.PutText(
-                    screenshot,
-                    label,
-                    new Point(snapshot.RoiX, labelY),
-                    HersheyFonts.HersheySimplex,
-                    0.55,
-                    new Scalar(0, 255, 255),
-                    2);
-            }
-
             foreach (var outputPath in outputPaths)
             {
                 Cv2.ImWrite(outputPath, screenshot);
@@ -910,26 +877,7 @@ public sealed class ResourceGatherTask : IBotTask
             var rh = Math.Clamp(height, 1, screenshot.Height - ry);
             var roi = new Rect(rx, ry, rw, rh);
 
-            using var annotated = screenshot.Clone();
-            Cv2.Rectangle(annotated, roi, new Scalar(0, 255, 255), 2);
-            Cv2.PutText(
-                annotated,
-                $"army-ocr {reason} roi=({rx},{ry},{rw},{rh}) val={(parsedValue.HasValue ? parsedValue.Value.ToString() : "null")}",
-                new Point(Math.Max(10, rx - 8), Math.Max(28, ry - 12)),
-                HersheyFonts.HersheySimplex,
-                0.5,
-                new Scalar(0, 255, 255),
-                2);
-
-            if (anchor is not null)
-            {
-                Cv2.Circle(
-                    annotated,
-                    new Point(anchor.CenterX, anchor.CenterY),
-                    9,
-                    new Scalar(0, 0, 255),
-                    3);
-            }
+            using var full = screenshot.Clone();
 
             using var crop = new Mat(screenshot, roi);
             var meta = BuildArmyMeta(
@@ -944,7 +892,7 @@ public sealed class ResourceGatherTask : IBotTask
 
             foreach (var root in roots)
             {
-                Cv2.ImWrite(Path.Combine(root, "full", $"{baseName}.png"), annotated);
+                Cv2.ImWrite(Path.Combine(root, "full", $"{baseName}.png"), full);
                 Cv2.ImWrite(Path.Combine(root, "crop", $"{baseName}.png"), crop);
                 await File.WriteAllTextAsync(
                     Path.Combine(root, "meta", $"{baseName}.txt"),
