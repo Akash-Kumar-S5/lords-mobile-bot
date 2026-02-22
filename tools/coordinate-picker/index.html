@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Coordinate Picker</title>
+  <style>
+    :root {
+      --bg: #111827;
+      --panel: #1f2937;
+      --text: #f9fafb;
+      --muted: #9ca3af;
+      --accent: #22d3ee;
+    }
+    body {
+      margin: 0;
+      font-family: Segoe UI, sans-serif;
+      background: linear-gradient(180deg, #0b1020, #111827);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 16px auto;
+      padding: 0 16px 24px;
+    }
+    .panel {
+      background: rgba(31, 41, 55, 0.92);
+      border: 1px solid #374151;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .chip {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+    button, input[type="file"] {
+      background: #0f172a;
+      color: var(--text);
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .hint { color: var(--muted); font-size: 13px; }
+    .canvas-wrap {
+      overflow: auto;
+      max-height: 76vh;
+      border: 1px solid #374151;
+      border-radius: 12px;
+      background: #0b1220;
+    }
+    canvas { display: block; cursor: crosshair; }
+    .mono { font-family: Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <div class="row">
+        <input id="fileInput" type="file" accept="image/*" />
+        <select id="modeSelect" class="chip">
+          <option value="point">Single Point</option>
+          <option value="roi4">4-Point Region</option>
+        </select>
+        <button id="resetBtn">Reset Marker</button>
+        <button id="copyBtn">Copy Value</button>
+        <span class="chip mono" id="coordLabel">X: -, Y: -</span>
+        <span class="chip mono" id="roiLabel">ROI: -</span>
+        <span class="chip mono" id="sizeLabel">Image: - x -</span>
+      </div>
+      <div class="hint" style="margin-top:10px;">
+        Single Point mode: click once to get X,Y.
+        4-Point Region mode: click 4 corners of the region; tool outputs X1..Y4 and bounding-box X,Y,W,H.
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="canvas-wrap">
+        <canvas id="canvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById("fileInput");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const modeSelect = document.getElementById("modeSelect");
+    const coordLabel = document.getElementById("coordLabel");
+    const roiLabel = document.getElementById("roiLabel");
+    const sizeLabel = document.getElementById("sizeLabel");
+    const resetBtn = document.getElementById("resetBtn");
+    const copyBtn = document.getElementById("copyBtn");
+
+    let image = null;
+    let marker = null; // single-point mode
+    let points = [];   // 4-point mode
+
+    function draw() {
+      if (!image) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0);
+      if (modeSelect.value === "point") {
+        if (!marker) return;
+
+        const { x, y } = marker;
+        ctx.strokeStyle = "#ff4d4d";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x - 18, y);
+        ctx.lineTo(x + 18, y);
+        ctx.moveTo(x, y - 18);
+        ctx.lineTo(x, y + 18);
+        ctx.stroke();
+
+        ctx.fillStyle = "#22d3ee";
+        ctx.font = "16px Consolas, monospace";
+        ctx.fillText(`(${x}, ${y})`, x + 14, y - 14);
+        return;
+      }
+
+      if (points.length === 0) return;
+
+      points.forEach((p, idx) => {
+        ctx.strokeStyle = "#ff4d4d";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = "#22d3ee";
+        ctx.font = "14px Consolas, monospace";
+        ctx.fillText(`P${idx + 1}`, p.x + 8, p.y - 8);
+      });
+
+      if (points.length >= 2) {
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 1; i < points.length; i++) {
+          ctx.lineTo(points[i].x, points[i].y);
+        }
+        if (points.length === 4) ctx.lineTo(points[0].x, points[0].y);
+        ctx.stroke();
+      }
+
+      if (points.length === 4) {
+        const xs = points.map(p => p.x);
+        const ys = points.map(p => p.y);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        ctx.strokeStyle = "#22d3ee";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+      }
+    }
+
+    function updateLabels() {
+      if (modeSelect.value === "point") {
+        roiLabel.textContent = "ROI: -";
+        if (!marker) {
+          coordLabel.textContent = "X: -, Y: -";
+          return;
+        }
+        coordLabel.textContent = `X: ${marker.x}, Y: ${marker.y}`;
+        return;
+      }
+
+      if (points.length === 0) {
+        coordLabel.textContent = "P1..P4: -";
+        roiLabel.textContent = "ROI: -";
+        return;
+      }
+
+      const pointText = points
+        .map((p, i) => `P${i + 1}=(${p.x},${p.y})`)
+        .join(" ");
+      coordLabel.textContent = pointText;
+
+      if (points.length < 4) {
+        roiLabel.textContent = `ROI: waiting (${points.length}/4)`;
+        return;
+      }
+
+      const xs = points.map(p => p.x);
+      const ys = points.map(p => p.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      roiLabel.textContent = `ROI: X=${minX} Y=${minY} W=${maxX - minX} H=${maxY - minY}`;
+    }
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        image = img;
+        marker = null;
+        points = [];
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        sizeLabel.textContent = `Image: ${img.naturalWidth} x ${img.naturalHeight}`;
+        updateLabels();
+        draw();
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    });
+
+    modeSelect.addEventListener("change", () => {
+      marker = null;
+      points = [];
+      updateLabels();
+      draw();
+    });
+
+    canvas.addEventListener("click", (ev) => {
+      if (!image) return;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = Math.round((ev.clientX - rect.left) * scaleX);
+      const y = Math.round((ev.clientY - rect.top) * scaleY);
+
+      if (modeSelect.value === "point") {
+        marker = { x, y };
+      } else {
+        if (points.length === 4) points = [];
+        points.push({ x, y });
+      }
+      updateLabels();
+      draw();
+    });
+
+    resetBtn.addEventListener("click", () => {
+      marker = null;
+      points = [];
+      updateLabels();
+      draw();
+    });
+
+    copyBtn.addEventListener("click", async () => {
+      let text = "";
+      if (modeSelect.value === "point") {
+        if (!marker) return;
+        text = `${marker.x},${marker.y}`;
+      } else {
+        if (points.length !== 4) return;
+        const xs = points.map(p => p.x);
+        const ys = points.map(p => p.y);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+        text =
+`X1=${points[0].x},Y1=${points[0].y}
+X2=${points[1].x},Y2=${points[1].y}
+X3=${points[2].x},Y3=${points[2].y}
+X4=${points[3].x},Y4=${points[3].y}
+ROI_X=${minX},ROI_Y=${minY},ROI_W=${maxX - minX},ROI_H=${maxY - minY}`;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // no-op fallback
+      }
+    });
+  </script>
+</body>
+</html>

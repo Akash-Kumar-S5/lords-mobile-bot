@@ -4,15 +4,22 @@ using Bot.Core.Models;
 using Bot.Emulator.Interfaces;
 using Bot.Infrastructure.Configuration;
 using Bot.Tasks.Interfaces;
+using Bot.Tasks.Configuration;
 using Bot.Vision.Interfaces;
 using Bot.Vision.Models;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
+using System.Text;
 
 namespace Bot.Tasks.Tasks;
 
 public sealed class ResourceGatherTask : IBotTask
 {
+    private const string LowestTierXEnv = "BOT_LOWEST_TIER_X";
+    private const string LowestTierYEnv = "BOT_LOWEST_TIER_Y";
+    private const string DeployXEnv = "BOT_DEPLOY_X";
+    private const string DeployYEnv = "BOT_DEPLOY_Y";
+
     private static readonly string[] GatherTemplates =
     {
         "gather_button.png"
@@ -49,6 +56,7 @@ public sealed class ResourceGatherTask : IBotTask
     private static readonly double[] MarchAnchorThresholds = { 0.82, 0.74, 0.66, 0.58, 0.50 };
     private static readonly double[] ClearSelectionThresholds = { 0.78, 0.70, 0.62, 0.55 };
     private static readonly double[] ArmyIndicatorThresholds = { 0.90, 0.85, 0.80, 0.75, 0.70 };
+    private static readonly double[] PopupCloseThresholds = { 0.90, 0.85, 0.80, 0.75 };
 
     private static readonly string[] ArmyIndicatorTemplates =
     {
@@ -58,12 +66,18 @@ public sealed class ResourceGatherTask : IBotTask
         Environment.GetEnvironmentVariable("BOT_SAVE_MARCH_DEBUG_ALWAYS"),
         "1",
         StringComparison.OrdinalIgnoreCase);
+    private static readonly bool SaveClickDebug = !string.Equals(
+        Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
+        "0",
+        StringComparison.OrdinalIgnoreCase);
 
     private const int StepTimeoutSeconds = 45;
     private static readonly TimeSpan MarchSlotWaitTimeout = TimeSpan.FromMinutes(4);
     private static readonly TimeSpan ArmyLimitRecheckInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan StuckPopupDuration = TimeSpan.FromMinutes(1);
     private const double ArmyIndicatorMinConfidence = 0.70;
     private const double ClearSelectionMinConfidence = 0.55;
+    private const double PopupCloseMinConfidence = 0.75;
 
     private readonly IEmulatorController _emulatorController;
     private readonly IStateResolver _stateResolver;
@@ -74,6 +88,8 @@ public sealed class ResourceGatherTask : IBotTask
     private readonly ILogger<ResourceGatherTask> _logger;
     private readonly Random _random = Random.Shared;
     private MarchScreenDebugSnapshot? _lastMarchSnapshot;
+    private GameState _lastResolvedState = GameState.Unknown;
+    private DateTimeOffset _stateSinceUtc = DateTimeOffset.UtcNow;
 
     private sealed record MarchScreenDebugSnapshot(
         DetectionResult DeployAnchor,
@@ -133,6 +149,13 @@ public sealed class ResourceGatherTask : IBotTask
                 var state = await ResolveStateWithFreshScreenshotAsync(context, cancellationToken)
                     .WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
                 _logger.LogInformation("Current state: {State}", state);
+                TrackState(state);
+
+                if (await TryForceCloseIfStuckOnPopupAsync(context, state, cancellationToken))
+                {
+                    await RandomDelayAsync(350, 850, cancellationToken);
+                    continue;
+                }
 
                 if (await IsAtArmyLimitAsync(context, cancellationToken))
                 {
@@ -193,7 +216,11 @@ public sealed class ResourceGatherTask : IBotTask
                         break;
 
                     default:
-                        _logger.LogWarning("Unknown state encountered. Running map recovery.");
+                        _logger.LogWarning("Unknown state encountered. Attempting to close active overlay.");
+                        if (!await TryCloseActiveOverlayAsync(context, cancellationToken))
+                        {
+                            _logger.LogWarning("No close overlay action succeeded. Running map recovery.");
+                        }
                         await RecoverToWorldMapAsync(context, cancellationToken);
                         break;
                 }
@@ -215,6 +242,52 @@ public sealed class ResourceGatherTask : IBotTask
         }
 
         _logger.LogInformation("Resource gather task loop stopped.");
+    }
+
+    private void TrackState(GameState currentState)
+    {
+        if (currentState == _lastResolvedState)
+        {
+            return;
+        }
+
+        _lastResolvedState = currentState;
+        _stateSinceUtc = DateTimeOffset.UtcNow;
+    }
+
+    private async Task<bool> TryForceCloseIfStuckOnPopupAsync(
+        BotExecutionContext context,
+        GameState currentState,
+        CancellationToken cancellationToken)
+    {
+        var popupState = currentState is GameState.TilePopup or GameState.ResourcePopup or GameState.MarchScreen;
+        if (!popupState)
+        {
+            return false;
+        }
+
+        var stuckFor = DateTimeOffset.UtcNow - _stateSinceUtc;
+        if (stuckFor < StuckPopupDuration)
+        {
+            return false;
+        }
+
+        _logger.LogWarning(
+            "Detected stuck popup state {State} for {Seconds:F0}s. Forcing popup-close template click.",
+            currentState,
+            stuckFor.TotalSeconds);
+
+        var close = await FindBestTemplateAsync(context, PopupCloseTemplates, ActionThresholds, cancellationToken);
+        if (!close.IsMatch)
+        {
+            _logger.LogWarning("Stuck-popup recovery: popup_close template not found.");
+            return false;
+        }
+
+        await TapWithOffsetAsync(context, close.CenterX, close.CenterY, "stuck-popup-close", cancellationToken);
+        await RandomDelayAsync(280, 620, cancellationToken);
+        _stateSinceUtc = DateTimeOffset.UtcNow;
+        return true;
     }
 
     private async Task TryWarmupAdbAsync(CancellationToken cancellationToken)
@@ -278,7 +351,7 @@ public sealed class ResourceGatherTask : IBotTask
             return false;
         }
 
-        await TapWithOffsetAsync(gather.CenterX, gather.CenterY, cancellationToken);
+        await TapWithOffsetAsync(context, gather.CenterX, gather.CenterY, "gather-button", cancellationToken);
         _logger.LogInformation("Clicked gather button.");
 
         await RandomDelayAsync(500, 1100, cancellationToken);
@@ -294,28 +367,28 @@ public sealed class ResourceGatherTask : IBotTask
 
     private async Task<bool> TrySelectLowestTierAndDeployAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
-        var deployAnchor = await FindBestTemplateAsync(context, DeployTemplates, MarchAnchorThresholds, cancellationToken);
-        if (!deployAnchor.IsMatch)
-        {
-            _logger.LogWarning("Deploy anchor not found on march screen.");
-            return false;
-        }
-
         var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
+        var marchControls = GetMarchControlPoints(screenWidth, screenHeight);
+        var deployAnchor = new DetectionResult(true, 1.0, marchControls.DeployX, marchControls.DeployY);
         _lastMarchSnapshot = null;
+        var usingManualControls = IsManualMarchControlsEnabled();
 
         // Enforce sequence: click lowest tier first, verify clear selection, then deploy.
-        await ClickLowestTierCandidateAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken);
+        await ClickLowestTierCandidateAsync(context, marchControls, cancellationToken);
         await RandomDelayAsync(420, 900, cancellationToken);
         if (AlwaysSaveMarchDebug)
         {
             await SaveMarchDebugFrameAsync(context, "after-lowest-tier-click", cancellationToken);
         }
 
-        if (!await IsClearSelectionActiveAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken))
+        if (usingManualControls && !ManualClickPoints.VerifyClearSelectionBeforeDeploy)
+        {
+            _logger.LogInformation("Manual march controls active. Skipping clear-selection verification and proceeding to deploy.");
+        }
+        else if (!await IsClearSelectionActiveAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken))
         {
             _logger.LogWarning("Clear Selection was not detected after lowest-tier click. Retrying lowest-tier click once.");
-            await ClickLowestTierCandidateAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken);
+            await ClickLowestTierCandidateAsync(context, marchControls, cancellationToken);
             await RandomDelayAsync(420, 900, cancellationToken);
             if (AlwaysSaveMarchDebug)
             {
@@ -326,18 +399,12 @@ public sealed class ResourceGatherTask : IBotTask
             {
                 _logger.LogWarning("Clear Selection was not detected after lowest-tier click. Skipping deploy.");
                 await SaveMarchDebugFrameAsync(context, "clear-selection-missing", cancellationToken);
+                await TryCloseActiveOverlayAsync(context, cancellationToken);
                 return false;
             }
         }
 
-        var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchAnchorThresholds, cancellationToken);
-        if (!deploy.IsMatch)
-        {
-            _logger.LogWarning("Deploy button not found after selecting lowest tier.");
-            return false;
-        }
-
-        await TapWithOffsetAsync(deploy.CenterX, deploy.CenterY, cancellationToken);
+        await TapWithOffsetAsync(context, marchControls.DeployX, marchControls.DeployY, "deploy-static", cancellationToken);
         _logger.LogInformation("Clicked deploy button. Gather dispatched successfully.");
         await RandomDelayAsync(450, 1100, cancellationToken);
         return true;
@@ -348,29 +415,7 @@ public sealed class ResourceGatherTask : IBotTask
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        var started = DateTimeOffset.UtcNow;
-        while (DateTimeOffset.UtcNow - started < timeout && !cancellationToken.IsCancellationRequested)
-        {
-            var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchAnchorThresholds, cancellationToken);
-            if (!deploy.IsMatch)
-            {
-                await RandomDelayAsync(220, 520, cancellationToken);
-                continue;
-            }
-
-            var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
-            if (await IsClearSelectionActiveAsync(context, deploy, screenWidth, screenHeight, cancellationToken))
-            {
-                _logger.LogInformation("March controls ready: deploy and clear-selection detected in expected relative positions.");
-                return true;
-            }
-
-            // March screen is considered ready once deploy anchor exists; clear-selection can be activated after one tap.
-            _logger.LogInformation("March controls ready: deploy detected, waiting to activate clear-selection.");
-            return true;
-        }
-
-        return false;
+        return await WaitForStateAsync(GameState.MarchScreen, context, timeout, cancellationToken);
     }
 
     private async Task<bool> IsClearSelectionActiveAsync(
@@ -479,38 +524,75 @@ public sealed class ResourceGatherTask : IBotTask
 
     private async Task ClickLowestTierCandidateAsync(
         BotExecutionContext context,
-        DetectionResult deployAnchor,
-        int screenWidth,
-        int screenHeight,
+        MarchControlPoints controls,
         CancellationToken cancellationToken)
     {
-        var lowestTier = await FindBestTemplateAsync(context, LowestTierTemplates, MarchActionThresholds, cancellationToken);
-        if (lowestTier.IsMatch)
+        await TapWithOffsetAsync(context, controls.LowestTierX, controls.LowestTierY, "lowest-tier-static", cancellationToken);
+        _logger.LogInformation(
+            "Clicked lowest-tier static point at ({X},{Y}).",
+            controls.LowestTierX,
+            controls.LowestTierY);
+    }
+
+    private static MarchControlPoints GetMarchControlPoints(int screenWidth, int screenHeight)
+    {
+        var manual = TryGetManualMarchControlPoints();
+        if (manual is not null)
         {
-            await TapWithOffsetAsync(lowestTier.CenterX, lowestTier.CenterY, cancellationToken);
-            _logger.LogInformation(
-                "Clicked lowest-tier template match at ({X},{Y}) confidence={Confidence:F3}.",
-                lowestTier.CenterX,
-                lowestTier.CenterY,
-                lowestTier.Confidence);
-            return;
+            return new MarchControlPoints(
+                Math.Clamp(manual.Value.LowestTierX, 10, screenWidth - 10),
+                Math.Clamp(manual.Value.LowestTierY, 10, screenHeight - 10),
+                Math.Clamp(manual.Value.DeployX, 10, screenWidth - 10),
+                Math.Clamp(manual.Value.DeployY, 10, screenHeight - 10));
         }
 
-        var targetX = Math.Clamp(
-            deployAnchor.CenterX + (int)(screenWidth * 0.01),
-            10,
-            screenWidth - 10);
-        var targetY = Math.Clamp(
-            deployAnchor.CenterY - (int)(screenHeight * 0.15),
-            10,
-            screenHeight - 10);
-
-        await TapWithOffsetAsync(targetX, targetY, cancellationToken);
-        _logger.LogInformation(
-            "Clicked lowest-tier control candidate via deploy-relative offset at ({X},{Y}).",
-            targetX,
-            targetY);
+        // Static control layout on march screen (resolution-relative).
+        var deployX = Math.Clamp((int)(screenWidth * 0.776), 10, screenWidth - 10);
+        var deployY = Math.Clamp((int)(screenHeight * 0.806), 10, screenHeight - 10);
+        var lowestTierX = Math.Clamp((int)(screenWidth * 0.786), 10, screenWidth - 10);
+        var lowestTierY = Math.Clamp((int)(screenHeight * 0.656), 10, screenHeight - 10);
+        return new MarchControlPoints(lowestTierX, lowestTierY, deployX, deployY);
     }
+
+    private static MarchControlPoints? TryGetManualMarchControlPoints()
+    {
+        if (ManualClickPoints.UseManualCoordinates)
+        {
+            return new MarchControlPoints(
+                ManualClickPoints.LowestTierX,
+                ManualClickPoints.LowestTierY,
+                ManualClickPoints.DeployX,
+                ManualClickPoints.DeployY);
+        }
+
+        if (!TryGetIntFromEnv(LowestTierXEnv, out var ltX)
+            || !TryGetIntFromEnv(LowestTierYEnv, out var ltY)
+            || !TryGetIntFromEnv(DeployXEnv, out var dpX)
+            || !TryGetIntFromEnv(DeployYEnv, out var dpY))
+        {
+            return null;
+        }
+
+        return new MarchControlPoints(ltX, ltY, dpX, dpY);
+    }
+
+    private static bool IsManualMarchControlsEnabled()
+    {
+        return ManualClickPoints.UseManualCoordinates
+            || (TryGetIntFromEnv(LowestTierXEnv, out _)
+                && TryGetIntFromEnv(LowestTierYEnv, out _)
+                && TryGetIntFromEnv(DeployXEnv, out _)
+                && TryGetIntFromEnv(DeployYEnv, out _));
+    }
+
+    private static bool TryGetIntFromEnv(string name, out int value)
+    {
+        value = 0;
+        var raw = Environment.GetEnvironmentVariable(name);
+        return !string.IsNullOrWhiteSpace(raw) && int.TryParse(raw, out value);
+    }
+
+    private readonly record struct MarchControlPoints(int LowestTierX, int LowestTierY, int DeployX, int DeployY);
 
     private static bool IsClearSelectionInExpectedZone(
         DetectionResult clearSelection,
@@ -641,6 +723,87 @@ public sealed class ResourceGatherTask : IBotTask
     private async Task<int?> DetectActiveMarchCountAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
         context = await CaptureContextAsync(context, cancellationToken);
+        var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
+
+        if (TryGetManualArmyIndicatorGateBounds(screenWidth, screenHeight, out var gateRect))
+        {
+            var gateTemplatePath = Path.Combine(context.TemplateRoot, "army_indicator_icon.png");
+            if (File.Exists(gateTemplatePath))
+            {
+                var gateDetection = await _imageDetector.FindTemplateInRegionAsync(
+                    context.ScreenshotPath,
+                    gateTemplatePath,
+                    gateRect.X,
+                    gateRect.Y,
+                    gateRect.W,
+                    gateRect.H,
+                    0.0,
+                    cancellationToken);
+
+                await SaveArmyOcrDebugAsync(
+                    context,
+                    "indicator-gate",
+                    gateRect.X,
+                    gateRect.Y,
+                    gateRect.W,
+                    gateRect.H,
+                    gateDetection,
+                    null,
+                    cancellationToken);
+
+                _logger.LogInformation(
+                    "Army indicator gate detection confidence={Confidence:F3} center=({X},{Y}) roi=({RX},{RY},{RW},{RH}) required>={Required:F3}",
+                    gateDetection.Confidence,
+                    gateDetection.CenterX,
+                    gateDetection.CenterY,
+                    gateRect.X,
+                    gateRect.Y,
+                    gateRect.W,
+                    gateRect.H,
+                    ManualClickPoints.ArmyIndicatorGateMinConfidence);
+
+                if (gateDetection.Confidence < ManualClickPoints.ArmyIndicatorGateMinConfidence)
+                {
+                    _logger.LogInformation("Army indicator gate failed. Skipping OCR for this cycle.");
+                    return null;
+                }
+            }
+        }
+
+        if (TryGetManualArmyOcrBounds(screenWidth, screenHeight, out var manualRect))
+        {
+            var manualValue = await _ocrReader.ReadIntegerAsync(
+                context.ScreenshotPath,
+                manualRect.X,
+                manualRect.Y,
+                manualRect.W,
+                manualRect.H,
+                cancellationToken);
+
+            await SaveArmyOcrDebugAsync(
+                context,
+                "manual-region",
+                manualRect.X,
+                manualRect.Y,
+                manualRect.W,
+                manualRect.H,
+                null,
+                manualValue,
+                cancellationToken);
+
+            _logger.LogInformation(
+                "Manual army OCR region used roi=({X},{Y},{W},{H}) value={Value}",
+                manualRect.X,
+                manualRect.Y,
+                manualRect.W,
+                manualRect.H,
+                manualValue.HasValue ? manualValue.Value.ToString() : "null");
+
+            if (manualValue is >= 0 and <= 9)
+            {
+                return manualValue;
+            }
+        }
 
         var indicator = await FindBestTemplateAsync(context, ArmyIndicatorTemplates, ArmyIndicatorThresholds, cancellationToken);
         if (!indicator.IsMatch)
@@ -649,7 +812,6 @@ public sealed class ResourceGatherTask : IBotTask
             return null;
         }
 
-        var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
         var inExpectedZone = indicator.CenterX <= (int)(screenWidth * 0.22)
             && indicator.CenterY >= (int)(screenHeight * 0.20)
             && indicator.CenterY <= (int)(screenHeight * 0.92);
@@ -679,6 +841,16 @@ public sealed class ResourceGatherTask : IBotTask
             var x = indicator.CenterX + dx;
             var y = indicator.CenterY + dy;
             var value = await _ocrReader.ReadIntegerAsync(context.ScreenshotPath, x, y, w, h, cancellationToken);
+            await SaveArmyOcrDebugAsync(
+                context,
+                "anchor-probe",
+                x,
+                y,
+                w,
+                h,
+                indicator,
+                value,
+                cancellationToken);
             _logger.LogDebug(
                 "Army OCR probe roi=({X},{Y},{W},{H}) value={Value}",
                 x,
@@ -694,6 +866,221 @@ public sealed class ResourceGatherTask : IBotTask
         }
 
         return null;
+    }
+
+    private async Task SaveArmyOcrDebugAsync(
+        BotExecutionContext context,
+        string reason,
+        int x,
+        int y,
+        int width,
+        int height,
+        DetectionResult? anchor,
+        int? parsedValue,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmssfff");
+            var baseName = $"army-{reason}-{stamp}";
+            var roots = new[]
+            {
+                Path.Combine(Directory.GetCurrentDirectory(), "logs", "debug", "army-ocr"),
+                Path.Combine(AppContext.BaseDirectory, "runtime", "debug", "army-ocr")
+            };
+
+            foreach (var root in roots)
+            {
+                Directory.CreateDirectory(Path.Combine(root, "full"));
+                Directory.CreateDirectory(Path.Combine(root, "crop"));
+                Directory.CreateDirectory(Path.Combine(root, "meta"));
+            }
+
+            using var screenshot = Cv2.ImRead(context.ScreenshotPath, ImreadModes.Color);
+            if (screenshot.Empty())
+            {
+                return;
+            }
+
+            var rx = Math.Clamp(x, 0, screenshot.Width - 1);
+            var ry = Math.Clamp(y, 0, screenshot.Height - 1);
+            var rw = Math.Clamp(width, 1, screenshot.Width - rx);
+            var rh = Math.Clamp(height, 1, screenshot.Height - ry);
+            var roi = new Rect(rx, ry, rw, rh);
+
+            using var annotated = screenshot.Clone();
+            Cv2.Rectangle(annotated, roi, new Scalar(0, 255, 255), 2);
+            Cv2.PutText(
+                annotated,
+                $"army-ocr {reason} roi=({rx},{ry},{rw},{rh}) val={(parsedValue.HasValue ? parsedValue.Value.ToString() : "null")}",
+                new Point(Math.Max(10, rx - 8), Math.Max(28, ry - 12)),
+                HersheyFonts.HersheySimplex,
+                0.5,
+                new Scalar(0, 255, 255),
+                2);
+
+            if (anchor is not null)
+            {
+                Cv2.Circle(
+                    annotated,
+                    new Point(anchor.CenterX, anchor.CenterY),
+                    9,
+                    new Scalar(0, 0, 255),
+                    3);
+            }
+
+            using var crop = new Mat(screenshot, roi);
+            var meta = BuildArmyMeta(
+                context.ScreenshotPath,
+                reason,
+                rx,
+                ry,
+                rw,
+                rh,
+                anchor,
+                parsedValue);
+
+            foreach (var root in roots)
+            {
+                Cv2.ImWrite(Path.Combine(root, "full", $"{baseName}.png"), annotated);
+                Cv2.ImWrite(Path.Combine(root, "crop", $"{baseName}.png"), crop);
+                await File.WriteAllTextAsync(
+                    Path.Combine(root, "meta", $"{baseName}.txt"),
+                    meta,
+                    Encoding.UTF8,
+                    cancellationToken);
+            }
+
+            _logger.LogDebug(
+                "Army OCR debug saved: reason={Reason} roi=({X},{Y},{W},{H}) value={Value}",
+                reason,
+                rx,
+                ry,
+                rw,
+                rh,
+                parsedValue.HasValue ? parsedValue.Value.ToString() : "null");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Unable to save army OCR debug artifacts.");
+        }
+    }
+
+    private static string BuildArmyMeta(
+        string screenshotPath,
+        string reason,
+        int x,
+        int y,
+        int width,
+        int height,
+        DetectionResult? anchor,
+        int? parsedValue)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"timestamp_utc={DateTimeOffset.UtcNow:O}");
+        sb.AppendLine($"reason={reason}");
+        sb.AppendLine($"screenshot={screenshotPath}");
+        sb.AppendLine($"roi_x={x}");
+        sb.AppendLine($"roi_y={y}");
+        sb.AppendLine($"roi_w={width}");
+        sb.AppendLine($"roi_h={height}");
+        sb.AppendLine($"ocr_value={(parsedValue.HasValue ? parsedValue.Value.ToString() : "null")}");
+        if (anchor is not null)
+        {
+            sb.AppendLine($"anchor_confidence={anchor.Confidence:F3}");
+            sb.AppendLine($"anchor_x={anchor.CenterX}");
+            sb.AppendLine($"anchor_y={anchor.CenterY}");
+        }
+        return sb.ToString();
+    }
+
+    private static bool TryGetManualArmyOcrBounds(int screenWidth, int screenHeight, out (int X, int Y, int W, int H) rect)
+    {
+        rect = default;
+        if (!ManualClickPoints.UseManualArmyOcrRegion)
+        {
+            return false;
+        }
+
+        var xs = new[]
+        {
+            ManualClickPoints.ArmyOcrX1,
+            ManualClickPoints.ArmyOcrX2,
+            ManualClickPoints.ArmyOcrX3,
+            ManualClickPoints.ArmyOcrX4
+        };
+        var ys = new[]
+        {
+            ManualClickPoints.ArmyOcrY1,
+            ManualClickPoints.ArmyOcrY2,
+            ManualClickPoints.ArmyOcrY3,
+            ManualClickPoints.ArmyOcrY4
+        };
+
+        if (xs.Any(v => v <= 0) || ys.Any(v => v <= 0))
+        {
+            return false;
+        }
+
+        var minX = Math.Clamp(xs.Min(), 0, screenWidth - 1);
+        var maxX = Math.Clamp(xs.Max(), 0, screenWidth - 1);
+        var minY = Math.Clamp(ys.Min(), 0, screenHeight - 1);
+        var maxY = Math.Clamp(ys.Max(), 0, screenHeight - 1);
+
+        var width = maxX - minX;
+        var height = maxY - minY;
+        if (width < 8 || height < 8)
+        {
+            return false;
+        }
+
+        rect = (minX, minY, width, height);
+        return true;
+    }
+
+    private static bool TryGetManualArmyIndicatorGateBounds(int screenWidth, int screenHeight, out (int X, int Y, int W, int H) rect)
+    {
+        rect = default;
+        if (!ManualClickPoints.UseManualArmyIndicatorGateRegion)
+        {
+            return false;
+        }
+
+        var xs = new[]
+        {
+            ManualClickPoints.ArmyIndicatorGateX1,
+            ManualClickPoints.ArmyIndicatorGateX2,
+            ManualClickPoints.ArmyIndicatorGateX3,
+            ManualClickPoints.ArmyIndicatorGateX4
+        };
+        var ys = new[]
+        {
+            ManualClickPoints.ArmyIndicatorGateY1,
+            ManualClickPoints.ArmyIndicatorGateY2,
+            ManualClickPoints.ArmyIndicatorGateY3,
+            ManualClickPoints.ArmyIndicatorGateY4
+        };
+
+        var minX = Math.Clamp(xs.Min(), 0, screenWidth - 1);
+        var maxX = Math.Clamp(xs.Max(), 0, screenWidth - 1);
+        var minY = Math.Clamp(ys.Min(), 0, screenHeight - 1);
+        var maxY = Math.Clamp(ys.Max(), 0, screenHeight - 1);
+
+        var width = maxX - minX;
+        var height = maxY - minY;
+        if (width < 8 || height < 8)
+        {
+            return false;
+        }
+
+        rect = (minX, minY, width, height);
+        return true;
     }
 
     private async Task WaitUntilMarchSlotFreeAsync(BotExecutionContext context, CancellationToken cancellationToken)
@@ -720,7 +1107,7 @@ public sealed class ResourceGatherTask : IBotTask
                         return false;
                     }
 
-                    await TapWithOffsetAsync(tile.CenterX, tile.CenterY, ct);
+                    await TapWithOffsetAsync(context, tile.CenterX, tile.CenterY, "march-probe-tile", ct);
                     await RandomDelayAsync(450, 900, ct);
                     if (!await WaitForStateAsync(GameState.ResourcePopup, context, TimeSpan.FromSeconds(6), ct))
                     {
@@ -733,7 +1120,7 @@ public sealed class ResourceGatherTask : IBotTask
                         return false;
                     }
 
-                    await TapWithOffsetAsync(gather.CenterX, gather.CenterY, ct);
+                    await TapWithOffsetAsync(context, gather.CenterX, gather.CenterY, "march-probe-gather", ct);
                     await RandomDelayAsync(450, 900, ct);
 
                     if (!await WaitForStateAsync(GameState.MarchScreen, context, TimeSpan.FromSeconds(6), ct))
@@ -891,7 +1278,7 @@ public sealed class ResourceGatherTask : IBotTask
             var x = resourceTile.CenterX + dx;
             var y = resourceTile.CenterY + dy;
 
-            await TapWithOffsetAsync(x, y, cancellationToken);
+            await TapWithOffsetAsync(context, x, y, "resource-probe", cancellationToken);
             _logger.LogInformation(
                 "Resource probe tap at ({X},{Y}) base=({BaseX},{BaseY}) confidence={Confidence:F3}",
                 x, y, resourceTile.CenterX, resourceTile.CenterY, resourceTile.Confidence);
@@ -938,30 +1325,90 @@ public sealed class ResourceGatherTask : IBotTask
 
     private async Task<bool> DismissTilePopupAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
-        var close = await FindBestTemplateAsync(context, PopupCloseTemplates, ActionThresholds, cancellationToken);
-        if (close.IsMatch)
+        var tileButton = await FindBestTemplateAsync(context, TilePopupTemplates, ActionThresholds, cancellationToken);
+        if (!tileButton.IsMatch)
         {
-            await TapWithOffsetAsync(close.CenterX, close.CenterY, cancellationToken);
+            _logger.LogWarning("Tile popup recovery requested but occupy/transfer buttons were not detected.");
+            return false;
+        }
+
+        // Primary: swipe outside popup to dismiss without tapping other tiles.
+        var (width, height) = await _emulatorController.GetResolutionAsync(cancellationToken);
+        var swipeStartX = Math.Clamp((int)(width * 0.86), 10, width - 10);
+        var swipeStartY = Math.Clamp((int)(height * 0.74), 10, height - 10);
+        var swipeEndX = Math.Clamp((int)(width * 0.60), 10, width - 10);
+        var swipeEndY = Math.Clamp((int)(height * 0.70), 10, height - 10);
+
+        await _emulatorController.SwipeAsync(swipeStartX, swipeStartY, swipeEndX, swipeEndY, 220, cancellationToken);
+        _logger.LogInformation(
+            "Attempted tile popup dismissal via outside swipe: ({StartX},{StartY}) -> ({EndX},{EndY}).",
+            swipeStartX,
+            swipeStartY,
+            swipeEndX,
+            swipeEndY);
+        await RandomDelayAsync(280, 620, cancellationToken);
+
+        var stateAfterSwipe = await ResolveStateWithFreshScreenshotAsync(context, cancellationToken);
+        if (stateAfterSwipe != GameState.TilePopup)
+        {
+            _logger.LogInformation("Tile popup dismissed by outside swipe.");
+            return true;
+        }
+
+        // Fallback: explicit close button.
+        var close = await TryFindPopupCloseAsync(context, cancellationToken);
+        if (close is not null)
+        {
+            await TapWithOffsetAsync(context, close.CenterX, close.CenterY, "popup-close", cancellationToken);
             _logger.LogInformation("Dismissed popup using close button.");
             await RandomDelayAsync(250, 550, cancellationToken);
             return true;
         }
 
-        var tileButton = await FindBestTemplateAsync(context, TilePopupTemplates, ActionThresholds, cancellationToken);
-        if (!tileButton.IsMatch)
+        _logger.LogWarning("Tile popup detected but close button was not confidently found. Skipping tap.");
+        return false;
+    }
+
+    private async Task<bool> TryCloseActiveOverlayAsync(BotExecutionContext context, CancellationToken cancellationToken)
+    {
+        var close = await TryFindPopupCloseAsync(context, cancellationToken);
+        if (close is not null)
         {
-            _logger.LogWarning("Tile popup detected but no close/tile button template matched for dismissal.");
-            return false;
+            await TapWithOffsetAsync(context, close.CenterX, close.CenterY, "overlay-close", cancellationToken);
+            _logger.LogInformation("Closed active overlay using close button.");
+            await RandomDelayAsync(280, 620, cancellationToken);
+            return true;
+        }
+
+        _logger.LogInformation("Overlay close button not confidently detected; skipping close tap.");
+        return false;
+    }
+
+    private async Task<DetectionResult?> TryFindPopupCloseAsync(
+        BotExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var candidate = await FindBestTemplateAsync(context, PopupCloseTemplates, PopupCloseThresholds, cancellationToken);
+        if (!candidate.IsMatch || candidate.Confidence < PopupCloseMinConfidence)
+        {
+            return null;
         }
 
         var (width, height) = await _emulatorController.GetResolutionAsync(cancellationToken);
-        var tapX = Math.Clamp(tileButton.CenterX - (int)(width * 0.24), 10, width - 10);
-        var tapY = Math.Clamp(tileButton.CenterY - (int)(height * 0.18), 10, height - 10);
+        var inTopRightZone = candidate.CenterX >= (int)(width * 0.80)
+            && candidate.CenterY <= (int)(height * 0.25);
 
-        await TapWithOffsetAsync(tapX, tapY, cancellationToken);
-        _logger.LogInformation("Dismissed tile popup by tapping outside panel near ({X},{Y}).", tapX, tapY);
-        await RandomDelayAsync(260, 620, cancellationToken);
-        return true;
+        if (!inTopRightZone)
+        {
+            _logger.LogWarning(
+                "Rejected popup-close candidate outside top-right zone: confidence={Confidence:F3} center=({X},{Y})",
+                candidate.Confidence,
+                candidate.CenterX,
+                candidate.CenterY);
+            return null;
+        }
+
+        return candidate;
     }
 
     private async Task<bool> ExecuteWithRetryAsync(
@@ -1026,11 +1473,80 @@ public sealed class ResourceGatherTask : IBotTask
         return context with { ScreenshotPath = screenshotPath };
     }
 
-    private async Task TapWithOffsetAsync(int x, int y, CancellationToken cancellationToken)
+    private async Task TapWithOffsetAsync(
+        BotExecutionContext context,
+        int x,
+        int y,
+        string reason,
+        CancellationToken cancellationToken)
     {
         var tapX = x + _random.Next(-5, 6);
         var tapY = y + _random.Next(-5, 6);
+        await SaveClickDebugFrameAsync(context, reason, tapX, tapY, cancellationToken);
         await _emulatorController.TapAsync(tapX, tapY, cancellationToken);
+    }
+
+    private async Task SaveClickDebugFrameAsync(
+        BotExecutionContext context,
+        string reason,
+        int tapX,
+        int tapY,
+        CancellationToken cancellationToken)
+    {
+        if (!SaveClickDebug)
+        {
+            return;
+        }
+
+        try
+        {
+            var tempRoot = Path.Combine(AppContext.BaseDirectory, "runtime", "screenshots");
+            Directory.CreateDirectory(tempRoot);
+            var sourcePath = Path.Combine(tempRoot, $"click-source-{Guid.NewGuid():N}.png");
+            await _emulatorController.TakeScreenshotAsync(sourcePath, cancellationToken);
+
+            using var screenshot = Cv2.ImRead(sourcePath, ImreadModes.Color);
+            if (screenshot.Empty())
+            {
+                return;
+            }
+
+            Cv2.Circle(screenshot, new Point(tapX, tapY), 12, new Scalar(0, 0, 255), 3);
+            Cv2.Line(screenshot, new Point(tapX - 18, tapY), new Point(tapX + 18, tapY), new Scalar(0, 0, 255), 2);
+            Cv2.Line(screenshot, new Point(tapX, tapY - 18), new Point(tapX, tapY + 18), new Scalar(0, 0, 255), 2);
+            Cv2.PutText(
+                screenshot,
+                $"tap:{reason} ({tapX},{tapY})",
+                new Point(Math.Max(10, tapX - 120), Math.Max(28, tapY - 20)),
+                HersheyFonts.HersheySimplex,
+                0.55,
+                new Scalar(0, 255, 255),
+                2);
+
+            var fileName = $"click-{reason}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmssfff}.png";
+            var outputPaths = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "runtime", "debug", "clicks", fileName),
+                Path.Combine(Directory.GetCurrentDirectory(), "logs", "debug", "clicks", fileName)
+            };
+
+            foreach (var outputPath in outputPaths)
+            {
+                var directory = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                Cv2.ImWrite(outputPath, screenshot);
+            }
+
+            _logger.LogInformation("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Unable to save click debug frame for reason={Reason}.", reason);
+        }
     }
 
     private Task RandomDelayAsync(int minMs, int maxMs, CancellationToken cancellationToken)

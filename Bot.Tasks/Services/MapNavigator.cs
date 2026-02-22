@@ -5,6 +5,7 @@ using Bot.Tasks.Interfaces;
 using Bot.Vision.Interfaces;
 using Bot.Vision.Models;
 using Microsoft.Extensions.Logging;
+using OpenCvSharp;
 
 namespace Bot.Tasks.Services;
 
@@ -21,6 +22,10 @@ public sealed class MapNavigator : IMapNavigator
     };
 
     private static readonly double[] ResourceThresholds = { 0.76, 0.68, 0.60, 0.52, 0.45 };
+    private static readonly bool SaveClickDebug = !string.Equals(
+        Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
+        "0",
+        StringComparison.OrdinalIgnoreCase);
 
     private readonly IEmulatorController _emulatorController;
     private readonly IImageDetector _imageDetector;
@@ -171,7 +176,7 @@ public sealed class MapNavigator : IMapNavigator
                     continue;
                 }
 
-                await TapWithOffsetAsync(detection.CenterX, detection.CenterY, cancellationToken);
+                await TapWithOffsetAsync(context, detection.CenterX, detection.CenterY, "map-icon", cancellationToken);
                 _logger.LogInformation("Clicked map icon using template {Template}.", template);
                 return true;
             }
@@ -180,11 +185,82 @@ public sealed class MapNavigator : IMapNavigator
         return false;
     }
 
-    private async Task TapWithOffsetAsync(int x, int y, CancellationToken cancellationToken)
+    private async Task TapWithOffsetAsync(
+        BotExecutionContext context,
+        int x,
+        int y,
+        string reason,
+        CancellationToken cancellationToken)
     {
         var offsetX = _random.Next(-5, 6);
         var offsetY = _random.Next(-5, 6);
-        await _emulatorController.TapAsync(x + offsetX, y + offsetY, cancellationToken);
+        var tapX = x + offsetX;
+        var tapY = y + offsetY;
+        await SaveClickDebugFrameAsync(context, reason, tapX, tapY, cancellationToken);
+        await _emulatorController.TapAsync(tapX, tapY, cancellationToken);
+    }
+
+    private async Task SaveClickDebugFrameAsync(
+        BotExecutionContext context,
+        string reason,
+        int tapX,
+        int tapY,
+        CancellationToken cancellationToken)
+    {
+        if (!SaveClickDebug)
+        {
+            return;
+        }
+
+        try
+        {
+            var tempRoot = Path.Combine(AppContext.BaseDirectory, "runtime", "screenshots");
+            Directory.CreateDirectory(tempRoot);
+            var sourcePath = Path.Combine(tempRoot, $"click-source-{Guid.NewGuid():N}.png");
+            await _emulatorController.TakeScreenshotAsync(sourcePath, cancellationToken);
+
+            using var screenshot = Cv2.ImRead(sourcePath, ImreadModes.Color);
+            if (screenshot.Empty())
+            {
+                return;
+            }
+
+            Cv2.Circle(screenshot, new Point(tapX, tapY), 12, new Scalar(0, 0, 255), 3);
+            Cv2.Line(screenshot, new Point(tapX - 18, tapY), new Point(tapX + 18, tapY), new Scalar(0, 0, 255), 2);
+            Cv2.Line(screenshot, new Point(tapX, tapY - 18), new Point(tapX, tapY + 18), new Scalar(0, 0, 255), 2);
+            Cv2.PutText(
+                screenshot,
+                $"tap:{reason} ({tapX},{tapY})",
+                new Point(Math.Max(10, tapX - 120), Math.Max(28, tapY - 20)),
+                HersheyFonts.HersheySimplex,
+                0.55,
+                new Scalar(0, 255, 255),
+                2);
+
+            var fileName = $"click-{reason}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmssfff}.png";
+            var outputPaths = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "runtime", "debug", "clicks", fileName),
+                Path.Combine(Directory.GetCurrentDirectory(), "logs", "debug", "clicks", fileName)
+            };
+
+            foreach (var outputPath in outputPaths)
+            {
+                var directory = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                Cv2.ImWrite(outputPath, screenshot);
+            }
+
+            _logger.LogInformation("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Unable to save click debug frame for reason={Reason}.", reason);
+        }
     }
 
     private double NextRatio(double min, double max) => min + ((max - min) * _random.NextDouble());
