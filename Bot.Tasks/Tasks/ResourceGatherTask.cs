@@ -7,6 +7,7 @@ using Bot.Tasks.Interfaces;
 using Bot.Vision.Interfaces;
 using Bot.Vision.Models;
 using Microsoft.Extensions.Logging;
+using OpenCvSharp;
 
 namespace Bot.Tasks.Tasks;
 
@@ -20,6 +21,11 @@ public sealed class ResourceGatherTask : IBotTask
     private static readonly string[] LowestTierTemplates =
     {
         "lowest_tier_button.png"
+    };
+
+    private static readonly string[] ClearSelectionTemplates =
+    {
+        "clear_section_button.png"
     };
 
     private static readonly string[] DeployTemplates =
@@ -40,17 +46,24 @@ public sealed class ResourceGatherTask : IBotTask
 
     private static readonly double[] ActionThresholds = { 0.80, 0.72, 0.64, 0.56, 0.48, 0.40 };
     private static readonly double[] MarchActionThresholds = { 0.72, 0.64, 0.56, 0.48, 0.40, 0.36, 0.32 };
-    private static readonly double[] ArmyIndicatorThresholds = { 0.85, 0.75, 0.65, 0.58, 0.52, 0.45, 0.38, 0.30 };
+    private static readonly double[] MarchAnchorThresholds = { 0.82, 0.74, 0.66, 0.58, 0.50 };
+    private static readonly double[] ClearSelectionThresholds = { 0.78, 0.70, 0.62, 0.55 };
+    private static readonly double[] ArmyIndicatorThresholds = { 0.90, 0.85, 0.80, 0.75, 0.70 };
 
     private static readonly string[] ArmyIndicatorTemplates =
     {
-        "army_indicator_icon.png",
-        "march_button.png"
+        "army_indicator_icon.png"
     };
+    private static readonly bool AlwaysSaveMarchDebug = string.Equals(
+        Environment.GetEnvironmentVariable("BOT_SAVE_MARCH_DEBUG_ALWAYS"),
+        "1",
+        StringComparison.OrdinalIgnoreCase);
 
     private const int StepTimeoutSeconds = 45;
     private static readonly TimeSpan MarchSlotWaitTimeout = TimeSpan.FromMinutes(4);
     private static readonly TimeSpan ArmyLimitRecheckInterval = TimeSpan.FromSeconds(10);
+    private const double ArmyIndicatorMinConfidence = 0.70;
+    private const double ClearSelectionMinConfidence = 0.55;
 
     private readonly IEmulatorController _emulatorController;
     private readonly IStateResolver _stateResolver;
@@ -60,6 +73,17 @@ public sealed class ResourceGatherTask : IBotTask
     private readonly IRuntimeBotSettings _runtimeBotSettings;
     private readonly ILogger<ResourceGatherTask> _logger;
     private readonly Random _random = Random.Shared;
+    private MarchScreenDebugSnapshot? _lastMarchSnapshot;
+
+    private sealed record MarchScreenDebugSnapshot(
+        DetectionResult DeployAnchor,
+        DetectionResult BestClearCandidate,
+        string TemplateName,
+        double Threshold,
+        int RoiX,
+        int RoiY,
+        int RoiW,
+        int RoiH);
 
     public ResourceGatherTask(
         IEmulatorController emulatorController,
@@ -270,20 +294,43 @@ public sealed class ResourceGatherTask : IBotTask
 
     private async Task<bool> TrySelectLowestTierAndDeployAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
-        var lowestTier = await FindBestTemplateAsync(context, LowestTierTemplates, MarchActionThresholds, cancellationToken);
-        if (!lowestTier.IsMatch)
+        var deployAnchor = await FindBestTemplateAsync(context, DeployTemplates, MarchAnchorThresholds, cancellationToken);
+        if (!deployAnchor.IsMatch)
         {
-            // Some screens may already have lowest tier selected; allow direct deploy fallback.
-            _logger.LogWarning("Lowest tier button not found on march screen. Trying deploy fallback.");
-        }
-        else
-        {
-            await TapWithOffsetAsync(lowestTier.CenterX, lowestTier.CenterY, cancellationToken);
-            _logger.LogInformation("Clicked lowest tier button.");
-            await RandomDelayAsync(420, 900, cancellationToken);
+            _logger.LogWarning("Deploy anchor not found on march screen.");
+            return false;
         }
 
-        var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchActionThresholds, cancellationToken);
+        var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
+        _lastMarchSnapshot = null;
+
+        // Enforce sequence: click lowest tier first, verify clear selection, then deploy.
+        await ClickLowestTierCandidateAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken);
+        await RandomDelayAsync(420, 900, cancellationToken);
+        if (AlwaysSaveMarchDebug)
+        {
+            await SaveMarchDebugFrameAsync(context, "after-lowest-tier-click", cancellationToken);
+        }
+
+        if (!await IsClearSelectionActiveAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken))
+        {
+            _logger.LogWarning("Clear Selection was not detected after lowest-tier click. Retrying lowest-tier click once.");
+            await ClickLowestTierCandidateAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken);
+            await RandomDelayAsync(420, 900, cancellationToken);
+            if (AlwaysSaveMarchDebug)
+            {
+                await SaveMarchDebugFrameAsync(context, "after-lowest-tier-retry", cancellationToken);
+            }
+
+            if (!await IsClearSelectionActiveAsync(context, deployAnchor, screenWidth, screenHeight, cancellationToken))
+            {
+                _logger.LogWarning("Clear Selection was not detected after lowest-tier click. Skipping deploy.");
+                await SaveMarchDebugFrameAsync(context, "clear-selection-missing", cancellationToken);
+                return false;
+            }
+        }
+
+        var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchAnchorThresholds, cancellationToken);
         if (!deploy.IsMatch)
         {
             _logger.LogWarning("Deploy button not found after selecting lowest tier.");
@@ -304,24 +351,273 @@ public sealed class ResourceGatherTask : IBotTask
         var started = DateTimeOffset.UtcNow;
         while (DateTimeOffset.UtcNow - started < timeout && !cancellationToken.IsCancellationRequested)
         {
-            var lowestTier = await FindBestTemplateAsync(context, LowestTierTemplates, MarchActionThresholds, cancellationToken);
-            if (lowestTier.IsMatch)
+            var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchAnchorThresholds, cancellationToken);
+            if (!deploy.IsMatch)
             {
-                _logger.LogInformation("March controls ready: lowest tier detected.");
+                await RandomDelayAsync(220, 520, cancellationToken);
+                continue;
+            }
+
+            var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
+            if (await IsClearSelectionActiveAsync(context, deploy, screenWidth, screenHeight, cancellationToken))
+            {
+                _logger.LogInformation("March controls ready: deploy and clear-selection detected in expected relative positions.");
                 return true;
             }
 
-            var deploy = await FindBestTemplateAsync(context, DeployTemplates, MarchActionThresholds, cancellationToken);
-            if (deploy.IsMatch)
-            {
-                _logger.LogInformation("March controls ready: deploy detected.");
-                return true;
-            }
-
-            await RandomDelayAsync(220, 520, cancellationToken);
+            // March screen is considered ready once deploy anchor exists; clear-selection can be activated after one tap.
+            _logger.LogInformation("March controls ready: deploy detected, waiting to activate clear-selection.");
+            return true;
         }
 
         return false;
+    }
+
+    private async Task<bool> IsClearSelectionActiveAsync(
+        BotExecutionContext context,
+        DetectionResult deploy,
+        int screenWidth,
+        int screenHeight,
+        CancellationToken cancellationToken)
+    {
+        var (rx, ry, rw, rh) = GetClearSelectionSearchRegion(deploy, screenWidth, screenHeight);
+        var best = DetectionResult.NotFound;
+        string selectedTemplate = "none";
+        var bestCandidateAnyThreshold = DetectionResult.NotFound;
+        string bestCandidateTemplate = "none";
+        double bestCandidateThreshold = 0;
+
+        foreach (var templateName in ClearSelectionTemplates)
+        {
+            var templatePath = Path.Combine(context.TemplateRoot, templateName);
+            if (!File.Exists(templatePath))
+            {
+                continue;
+            }
+
+            foreach (var threshold in ClearSelectionThresholds)
+            {
+                context = await CaptureContextAsync(context, cancellationToken);
+                var detection = await _imageDetector.FindTemplateInRegionAsync(
+                    context.ScreenshotPath,
+                    templatePath,
+                    rx,
+                    ry,
+                    rw,
+                    rh,
+                    threshold,
+                    cancellationToken);
+
+                _logger.LogInformation(
+                    "Clear-selection ROI detection template={Template} threshold={Threshold:F2} match={Match} confidence={Confidence:F3} center=({X},{Y}) roi=({RX},{RY},{RW},{RH})",
+                    templateName,
+                    threshold,
+                    detection.IsMatch,
+                    detection.Confidence,
+                    detection.CenterX,
+                    detection.CenterY,
+                    rx,
+                    ry,
+                    rw,
+                    rh);
+
+                if (detection.Confidence > bestCandidateAnyThreshold.Confidence)
+                {
+                    bestCandidateAnyThreshold = detection;
+                    bestCandidateTemplate = templateName;
+                    bestCandidateThreshold = threshold;
+                }
+
+                if (!detection.IsMatch || detection.Confidence < ClearSelectionMinConfidence)
+                {
+                    continue;
+                }
+
+                if (!best.IsMatch || detection.Confidence > best.Confidence)
+                {
+                    best = detection;
+                    selectedTemplate = templateName;
+                }
+            }
+        }
+
+        _lastMarchSnapshot = new MarchScreenDebugSnapshot(
+            deploy,
+            bestCandidateAnyThreshold,
+            bestCandidateTemplate,
+            bestCandidateThreshold,
+            rx,
+            ry,
+            rw,
+            rh);
+
+        if (!best.IsMatch)
+        {
+            return false;
+        }
+
+        var dx = best.CenterX - deploy.CenterX;
+        var dy = best.CenterY - deploy.CenterY;
+        _logger.LogInformation(
+            "Clear-selection candidate selected template={Template} confidence={Confidence:F3} dx={Dx} dy={Dy}",
+            selectedTemplate,
+            best.Confidence,
+            dx,
+            dy);
+
+        if (!IsClearSelectionInExpectedZone(best, deploy, screenWidth, screenHeight))
+        {
+            _logger.LogWarning("Clear-selection candidate rejected by relative position gate.");
+            return false;
+        }
+
+        context = await CaptureContextAsync(context, cancellationToken);
+        var text = (await _ocrReader.ReadTextAsync(context.ScreenshotPath, rx, ry, rw, rh, cancellationToken)).ToLowerInvariant();
+        _logger.LogInformation("Clear-selection OCR text='{Text}'", text);
+        return text.Contains("clear", StringComparison.Ordinal);
+    }
+
+    private async Task ClickLowestTierCandidateAsync(
+        BotExecutionContext context,
+        DetectionResult deployAnchor,
+        int screenWidth,
+        int screenHeight,
+        CancellationToken cancellationToken)
+    {
+        var lowestTier = await FindBestTemplateAsync(context, LowestTierTemplates, MarchActionThresholds, cancellationToken);
+        if (lowestTier.IsMatch)
+        {
+            await TapWithOffsetAsync(lowestTier.CenterX, lowestTier.CenterY, cancellationToken);
+            _logger.LogInformation(
+                "Clicked lowest-tier template match at ({X},{Y}) confidence={Confidence:F3}.",
+                lowestTier.CenterX,
+                lowestTier.CenterY,
+                lowestTier.Confidence);
+            return;
+        }
+
+        var targetX = Math.Clamp(
+            deployAnchor.CenterX + (int)(screenWidth * 0.01),
+            10,
+            screenWidth - 10);
+        var targetY = Math.Clamp(
+            deployAnchor.CenterY - (int)(screenHeight * 0.15),
+            10,
+            screenHeight - 10);
+
+        await TapWithOffsetAsync(targetX, targetY, cancellationToken);
+        _logger.LogInformation(
+            "Clicked lowest-tier control candidate via deploy-relative offset at ({X},{Y}).",
+            targetX,
+            targetY);
+    }
+
+    private static bool IsClearSelectionInExpectedZone(
+        DetectionResult clearSelection,
+        DetectionResult deploy,
+        int screenWidth,
+        int screenHeight)
+    {
+        var dx = clearSelection.CenterX - deploy.CenterX;
+        var dy = clearSelection.CenterY - deploy.CenterY;
+
+        var minDx = (int)(-0.12 * screenWidth);
+        var maxDx = (int)(0.16 * screenWidth);
+        var minDy = (int)(-0.42 * screenHeight);
+        var maxDy = (int)(-0.10 * screenHeight);
+
+        return dx >= minDx && dx <= maxDx && dy >= minDy && dy <= maxDy;
+    }
+
+    private static (int X, int Y, int W, int H) GetClearSelectionSearchRegion(
+        DetectionResult deploy,
+        int screenWidth,
+        int screenHeight)
+    {
+        // Clear Selection sits just above deploy on the right panel.
+        // Keep ROI anchored relative to deploy to stay resolution-independent.
+        var x = Math.Clamp(deploy.CenterX - (int)(screenWidth * 0.12), 0, screenWidth - 1);
+        var y = Math.Clamp(deploy.CenterY - (int)(screenHeight * 0.28), 0, screenHeight - 1);
+        var w = Math.Clamp((int)(screenWidth * 0.26), 60, screenWidth - x);
+        var h = Math.Clamp((int)(screenHeight * 0.26), 60, screenHeight - y);
+        return (x, y, w, h);
+    }
+
+    private async Task SaveMarchDebugFrameAsync(
+        BotExecutionContext context,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            context = await CaptureContextAsync(context, cancellationToken);
+            var fileName = $"march-{reason}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmssfff}.png";
+            var outputPaths = new[]
+            {
+                Path.Combine(AppContext.BaseDirectory, "runtime", "debug", fileName),
+                Path.Combine(Directory.GetCurrentDirectory(), "logs", "debug", fileName)
+            };
+
+            foreach (var outputPath in outputPaths)
+            {
+                var directory = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+            }
+
+            using var screenshot = Cv2.ImRead(context.ScreenshotPath, ImreadModes.Color);
+            if (screenshot.Empty())
+            {
+                foreach (var outputPath in outputPaths)
+                {
+                    File.Copy(context.ScreenshotPath, outputPath, overwrite: true);
+                    _logger.LogWarning("Saved march debug frame (unannotated): {Path}", outputPath);
+                }
+                return;
+            }
+
+            var snapshot = _lastMarchSnapshot;
+            if (snapshot is not null)
+            {
+                var roi = new Rect(snapshot.RoiX, snapshot.RoiY, snapshot.RoiW, snapshot.RoiH);
+                Cv2.Rectangle(screenshot, roi, new Scalar(0, 255, 255), 2);
+                Cv2.Circle(
+                    screenshot,
+                    new Point(snapshot.DeployAnchor.CenterX, snapshot.DeployAnchor.CenterY),
+                    10,
+                    new Scalar(255, 128, 0),
+                    3);
+                Cv2.Circle(
+                    screenshot,
+                    new Point(snapshot.BestClearCandidate.CenterX, snapshot.BestClearCandidate.CenterY),
+                    10,
+                    new Scalar(0, 0, 255),
+                    3);
+
+                var label = $"clear={snapshot.BestClearCandidate.Confidence:F3} t={snapshot.Threshold:F2} tpl={snapshot.TemplateName}";
+                var labelY = Math.Max(24, snapshot.RoiY - 10);
+                Cv2.PutText(
+                    screenshot,
+                    label,
+                    new Point(snapshot.RoiX, labelY),
+                    HersheyFonts.HersheySimplex,
+                    0.55,
+                    new Scalar(0, 255, 255),
+                    2);
+            }
+
+            foreach (var outputPath in outputPaths)
+            {
+                Cv2.ImWrite(outputPath, screenshot);
+                _logger.LogWarning("Saved march debug frame: {Path}", outputPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Unable to save march debug frame.");
+        }
     }
 
     private async Task<bool> IsAtArmyLimitAsync(BotExecutionContext context, CancellationToken cancellationToken)
@@ -350,6 +646,22 @@ public sealed class ResourceGatherTask : IBotTask
         if (!indicator.IsMatch)
         {
             _logger.LogDebug("Army indicator icon not found for OCR.");
+            return null;
+        }
+
+        var (screenWidth, screenHeight) = await _emulatorController.GetResolutionAsync(cancellationToken);
+        var inExpectedZone = indicator.CenterX <= (int)(screenWidth * 0.22)
+            && indicator.CenterY >= (int)(screenHeight * 0.20)
+            && indicator.CenterY <= (int)(screenHeight * 0.92);
+
+        if (indicator.Confidence < ArmyIndicatorMinConfidence || !inExpectedZone)
+        {
+            _logger.LogInformation(
+                "Rejected army indicator anchor: confidence={Confidence:F3}, center=({X},{Y}), zoneOk={ZoneOk}.",
+                indicator.Confidence,
+                indicator.CenterX,
+                indicator.CenterY,
+                inExpectedZone);
             return null;
         }
 

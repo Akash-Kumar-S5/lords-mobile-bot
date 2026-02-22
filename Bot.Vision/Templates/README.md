@@ -5,8 +5,12 @@ Place gameplay template images in this folder:
 - `map_button.png`
 - `resource_tile.png`
 - `gather_button.png`
-- `lowest_tier_button.png`
+- `clear_section_button.png`
 - `deploy_button.png`
+
+Optional:
+
+- `lowest_tier_button.png`
 
 Army indicator template (needed for OCR-based max army limit control):
 

@@ -5,14 +5,14 @@ namespace Bot.Tasks.Services;
 
 public sealed class TemplateVerifier : ITemplateVerifier
 {
-    private static readonly string[] RequiredTemplates =
-    {
-        "map_button.png",
-        "resource_tile.png",
-        "gather_button.png",
-        "lowest_tier_button.png",
-        "deploy_button.png"
-    };
+    private static readonly IReadOnlyList<string[]> RequiredTemplateGroups =
+    [
+        ["map_button.png"],
+        ["resource_tile.png"],
+        ["gather_button.png"],
+        ["clear_section_button.png"],
+        ["deploy_button.png"]
+    ];
 
     private readonly ILogger<TemplateVerifier> _logger;
 
@@ -28,12 +28,17 @@ public sealed class TemplateVerifier : ITemplateVerifier
         var templateRoot = ResolveTemplateRoot();
         var missing = new List<string>();
 
-        foreach (var template in RequiredTemplates)
+        foreach (var group in RequiredTemplateGroups)
         {
-            var path = Path.Combine(templateRoot, template);
-            if (!File.Exists(path))
+            var hasAny = group.Any(template =>
             {
-                missing.Add(template);
+                var path = Path.Combine(templateRoot, template);
+                return File.Exists(path);
+            });
+
+            if (!hasAny)
+            {
+                missing.Add(string.Join(" | ", group));
             }
         }
 

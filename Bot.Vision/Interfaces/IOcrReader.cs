@@ -9,4 +9,12 @@ public interface IOcrReader
         int width,
         int height,
         CancellationToken cancellationToken = default);
+
+    Task<string> ReadTextAsync(
+        string screenshotPath,
+        int x,
+        int y,
+        int width,
+        int height,
+        CancellationToken cancellationToken = default);
 }

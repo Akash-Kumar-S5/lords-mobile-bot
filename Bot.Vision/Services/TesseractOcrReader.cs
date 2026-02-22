@@ -14,6 +14,38 @@ public sealed class TesseractOcrReader : IOcrReader
         int height,
         CancellationToken cancellationToken = default)
     {
+        var text = ProcessOcr(screenshotPath, x, y, width, height, "0123456789", PageSegMode.SingleWord, cancellationToken);
+        var digitsOnly = new string(text.Where(char.IsDigit).ToArray());
+        if (int.TryParse(digitsOnly, out var value))
+        {
+            return Task.FromResult<int?>(value);
+        }
+
+        return Task.FromResult<int?>(null);
+    }
+
+    public Task<string> ReadTextAsync(
+        string screenshotPath,
+        int x,
+        int y,
+        int width,
+        int height,
+        CancellationToken cancellationToken = default)
+    {
+        var text = ProcessOcr(screenshotPath, x, y, width, height, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ", PageSegMode.SingleLine, cancellationToken);
+        return Task.FromResult(text);
+    }
+
+    private static string ProcessOcr(
+        string screenshotPath,
+        int x,
+        int y,
+        int width,
+        int height,
+        string whitelist,
+        PageSegMode psm,
+        CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
 
         if (!File.Exists(screenshotPath))
@@ -24,7 +56,7 @@ public sealed class TesseractOcrReader : IOcrReader
         using var screenshot = Cv2.ImRead(screenshotPath, ImreadModes.Color);
         if (screenshot.Empty())
         {
-            return Task.FromResult<int?>(null);
+            return string.Empty;
         }
 
         var rx = Math.Clamp(x, 0, Math.Max(0, screenshot.Width - 1));
@@ -33,7 +65,7 @@ public sealed class TesseractOcrReader : IOcrReader
         var rh = Math.Clamp(height, 1, screenshot.Height - ry);
         if (rw <= 1 || rh <= 1)
         {
-            return Task.FromResult<int?>(null);
+            return string.Empty;
         }
 
         using var roi = new Mat(screenshot, new OpenCvSharp.Rect(rx, ry, rw, rh));
@@ -51,19 +83,12 @@ public sealed class TesseractOcrReader : IOcrReader
         try
         {
             using var engine = new TesseractEngine(ResolveTessdataPath(), "eng", EngineMode.Default);
-            engine.SetVariable("tessedit_char_whitelist", "0123456789");
-            engine.DefaultPageSegMode = PageSegMode.SingleWord;
+            engine.SetVariable("tessedit_char_whitelist", whitelist);
+            engine.DefaultPageSegMode = psm;
 
             using var pix = Pix.LoadFromFile(tempPath);
             using var page = engine.Process(pix);
-            var text = (page.GetText() ?? string.Empty).Trim();
-            var digitsOnly = new string(text.Where(char.IsDigit).ToArray());
-            if (int.TryParse(digitsOnly, out var value))
-            {
-                return Task.FromResult<int?>(value);
-            }
-
-            return Task.FromResult<int?>(null);
+            return (page.GetText() ?? string.Empty).Trim();
         }
         finally
         {
