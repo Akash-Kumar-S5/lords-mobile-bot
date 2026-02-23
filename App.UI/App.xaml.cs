@@ -46,6 +46,8 @@ public partial class App : Application
         services.AddSingleton<ITemplateVerifier, TemplateVerifier>();
         services.AddSingleton<IBotTask, ResourceGatherTask>();
         services.AddSingleton<IStateResolver, StateResolver>();
+        services.AddSingleton<IBotModeController, BotModeController>();
+        services.AddSingleton<IArmyLimitMonitorService, ArmyLimitMonitorService>();
         services.AddSingleton<ITaskSchedulerService, TaskSchedulerService>();
         services.AddSingleton<IBotEngine, BotEngine>();
 

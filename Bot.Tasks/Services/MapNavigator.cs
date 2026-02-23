@@ -13,7 +13,6 @@ public sealed class MapNavigator : IMapNavigator
 {
     private static readonly string[] ResourceTemplates =
     {
-        "resource_tile.png",
         "resource_stone.png",
         "resource_wood.png",
         "resource_ore.png",
@@ -22,7 +21,10 @@ public sealed class MapNavigator : IMapNavigator
     };
 
     private static readonly double[] ResourceThresholds = { 0.76, 0.68, 0.60, 0.52, 0.45 };
-    private static readonly bool SaveClickDebug = false;
+    private static readonly bool SaveClickDebug = !string.Equals(
+        Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
+        "0",
+        StringComparison.OrdinalIgnoreCase);
 
     private readonly IEmulatorController _emulatorController;
     private readonly IImageDetector _imageDetector;
@@ -139,7 +141,7 @@ public sealed class MapNavigator : IMapNavigator
         if (!File.Exists(templatePath))
         {
             if (string.Equals(templateName, "map_button.png", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(templateName, "resource_tile.png", StringComparison.OrdinalIgnoreCase))
+                || string.Equals(templateName, "resource_stone.png", StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogWarning("Template file missing: {TemplatePath}", templatePath);
             }

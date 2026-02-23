@@ -66,9 +66,14 @@ public sealed class ResourceGatherTask : IBotTask
         Environment.GetEnvironmentVariable("BOT_SAVE_MARCH_DEBUG_ALWAYS"),
         "1",
         StringComparison.OrdinalIgnoreCase);
-    private static readonly bool SaveClickDebug = false;
+    private static readonly bool SaveClickDebug = !string.Equals(
+        Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
+        "0",
+        StringComparison.OrdinalIgnoreCase);
 
     private const int StepTimeoutSeconds = 45;
+    private const double MinFrameMeanDiffAfterTap = 0.65;
+    private const double MinFrameChangedPixelRatioAfterTap = 0.0025;
     private static readonly TimeSpan MarchSlotWaitTimeout = TimeSpan.FromMinutes(4);
     private static readonly TimeSpan ArmyLimitRecheckInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan StuckPopupDuration = TimeSpan.FromMinutes(1);
@@ -82,11 +87,14 @@ public sealed class ResourceGatherTask : IBotTask
     private readonly IImageDetector _imageDetector;
     private readonly IOcrReader _ocrReader;
     private readonly IRuntimeBotSettings _runtimeBotSettings;
+    private readonly IBotModeController _modeController;
+    private readonly IArmyLimitMonitorService _armyLimitMonitorService;
     private readonly ILogger<ResourceGatherTask> _logger;
     private readonly Random _random = Random.Shared;
     private MarchScreenDebugSnapshot? _lastMarchSnapshot;
     private GameState _lastResolvedState = GameState.Unknown;
     private DateTimeOffset _stateSinceUtc = DateTimeOffset.UtcNow;
+    private bool _adbWarmedUp;
 
     private sealed record MarchScreenDebugSnapshot(
         DetectionResult DeployAnchor,
@@ -105,6 +113,8 @@ public sealed class ResourceGatherTask : IBotTask
         IImageDetector imageDetector,
         IOcrReader ocrReader,
         IRuntimeBotSettings runtimeBotSettings,
+        IBotModeController modeController,
+        IArmyLimitMonitorService armyLimitMonitorService,
         ILogger<ResourceGatherTask> logger)
     {
         _emulatorController = emulatorController;
@@ -113,6 +123,8 @@ public sealed class ResourceGatherTask : IBotTask
         _imageDetector = imageDetector;
         _ocrReader = ocrReader;
         _runtimeBotSettings = runtimeBotSettings;
+        _modeController = modeController;
+        _armyLimitMonitorService = armyLimitMonitorService;
         _logger = logger;
     }
 
@@ -131,12 +143,26 @@ public sealed class ResourceGatherTask : IBotTask
 
     public async Task ExecuteAsync(CancellationToken cancellationToken = default)
     {
+        if (_modeController.CurrentMode != BotRunMode.Running)
+        {
+            return;
+        }
+
         _logger.LogInformation("Resource gather task loop started.");
-        await TryWarmupAdbAsync(cancellationToken);
+        if (!_adbWarmedUp)
+        {
+            await TryWarmupAdbAsync(cancellationToken);
+            _adbWarmedUp = true;
+        }
         _logger.LogInformation("Entering gather execution loop.");
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            if (_modeController.CurrentMode != BotRunMode.Running)
+            {
+                return;
+            }
+
             try
             {
                 _logger.LogDebug("Loop tick: building execution context.");
@@ -156,13 +182,9 @@ public sealed class ResourceGatherTask : IBotTask
 
                 if (await IsAtArmyLimitAsync(context, cancellationToken))
                 {
-                    var limit = Math.Max(1, _runtimeBotSettings.MaxActiveMarches);
-                    _logger.LogInformation(
-                        "Max army limit reached (active marches >= {Limit}). Rechecking in {Seconds}s.",
-                        limit,
-                        ArmyLimitRecheckInterval.TotalSeconds);
-                    await Task.Delay(ArmyLimitRecheckInterval, cancellationToken);
-                    continue;
+                    _modeController.EnterArmyMonitor("Army limit reached");
+                    _logger.LogInformation("Army limit reached. Switching to ArmyMonitor mode.");
+                    return;
                 }
 
                 switch (state)
@@ -321,12 +343,37 @@ public sealed class ResourceGatherTask : IBotTask
             await RandomDelayAsync(300, 900, cancellationToken);
         }
 
-        context = await CaptureContextAsync(context, cancellationToken);
-        var resourceTile = await _mapNavigator.FindResourceTileAsync(context, cancellationToken);
+        DetectionResult resourceTile = DetectionResult.NotFound;
+        const int maxResourceScanAttempts = 4;
+        for (var scanAttempt = 1; scanAttempt <= maxResourceScanAttempts; scanAttempt++)
+        {
+            context = await CaptureContextAsync(context, cancellationToken);
+            resourceTile = await _mapNavigator.FindResourceTileAsync(context, cancellationToken);
+            if (resourceTile.IsMatch)
+            {
+                if (scanAttempt > 1)
+                {
+                    _logger.LogInformation(
+                        "Resource found after map sweep attempt {Attempt}/{MaxAttempts}.",
+                        scanAttempt,
+                        maxResourceScanAttempts);
+                }
+                break;
+            }
+
+            _logger.LogWarning(
+                "No resource tile detected on attempt {Attempt}/{MaxAttempts}, confidence={Confidence:F3}. Swiping map for more.",
+                scanAttempt,
+                maxResourceScanAttempts,
+                resourceTile.Confidence);
+
+            await _mapNavigator.RandomMapPanAsync(context, cancellationToken);
+            await RandomDelayAsync(260, 700, cancellationToken);
+        }
+
         if (!resourceTile.IsMatch)
         {
-            _logger.LogWarning("No resource tile detected, confidence={Confidence:F3}.", resourceTile.Confidence);
-            await _mapNavigator.RandomMapPanAsync(context, cancellationToken);
+            _logger.LogWarning("No resource found after map sweep attempts. Continuing next loop tick.");
             return false;
         }
 
@@ -671,20 +718,20 @@ public sealed class ResourceGatherTask : IBotTask
 
     private async Task<bool> IsAtArmyLimitAsync(BotExecutionContext context, CancellationToken cancellationToken)
     {
-        var configuredLimit = Math.Max(1, _runtimeBotSettings.MaxActiveMarches);
-        var marchCount = await DetectActiveMarchCountAsync(context, cancellationToken);
-        if (marchCount is null)
+        var result = await _armyLimitMonitorService.CheckNowAsync(cancellationToken);
+        if (!result.IsReadable)
         {
-            _logger.LogInformation("March count icon missing or unreadable. Continuing resource collection.");
+            _logger.LogInformation("Army monitor check unreadable in task tick: {Reason}", result.Reason);
             return false;
         }
 
         _logger.LogInformation(
-            "Detected active marches: {ActiveMarches}. Configured max army limit: {ConfiguredLimit}.",
-            marchCount.Value,
-            configuredLimit);
+            "Army monitor check in task tick: marches={Marches} limit={Limit} atOrAbove={AtOrAbove}",
+            result.DetectedMarches,
+            result.ConfiguredLimit,
+            result.AtOrAboveLimit);
 
-        return marchCount.Value >= configuredLimit;
+        return result.AtOrAboveLimit;
     }
 
     private async Task<int?> DetectActiveMarchCountAsync(BotExecutionContext context, CancellationToken cancellationToken)
@@ -1038,58 +1085,30 @@ public sealed class ResourceGatherTask : IBotTask
 
         while (!cancellationToken.IsCancellationRequested && DateTimeOffset.UtcNow - started < MarchSlotWaitTimeout)
         {
-            var probeReady = await ExecuteWithRetryAsync(
-                "March slot probe",
-                async ct =>
-                {
-                    if (!await EnsureWorldMapWithFreshCaptureAsync(context, ct))
-                    {
-                        return false;
-                    }
+            var check = await _armyLimitMonitorService.CheckNowAsync(cancellationToken);
+            _logger.LogInformation(
+                "March wait check: readable={Readable} marches={Marches} limit={Limit} atOrAbove={AtOrAbove} reason={Reason}",
+                check.IsReadable,
+                check.DetectedMarches,
+                check.ConfiguredLimit,
+                check.AtOrAboveLimit,
+                check.Reason);
 
-                    context = await CaptureContextAsync(context, ct);
-                    var tile = await _mapNavigator.FindResourceTileAsync(context, ct);
-                    if (!tile.IsMatch)
-                    {
-                        await _mapNavigator.RandomMapPanAsync(context, ct);
-                        return false;
-                    }
-
-                    await TapWithOffsetAsync(context, tile.CenterX, tile.CenterY, "march-probe-tile", ct);
-                    await RandomDelayAsync(450, 900, ct);
-                    if (!await WaitForStateAsync(GameState.ResourcePopup, context, TimeSpan.FromSeconds(6), ct))
-                    {
-                        return false;
-                    }
-
-                    var gather = await FindBestTemplateAsync(context, GatherTemplates, ActionThresholds, ct);
-                    if (!gather.IsMatch)
-                    {
-                        return false;
-                    }
-
-                    await TapWithOffsetAsync(context, gather.CenterX, gather.CenterY, "march-probe-gather", ct);
-                    await RandomDelayAsync(450, 900, ct);
-
-                    if (!await WaitForStateAsync(GameState.MarchScreen, context, TimeSpan.FromSeconds(6), ct))
-                    {
-                        return false;
-                    }
-
-                    var deploy = await FindBestTemplateAsync(context, DeployTemplates, ActionThresholds, ct);
-                    return deploy.IsMatch;
-                },
-                1,
-                cancellationToken);
-
-            if (probeReady)
+            if (!check.IsReadable)
             {
-                _logger.LogInformation("March slot is available again.");
+                _logger.LogWarning("March wait: precheck/ocr unreadable, retrying.");
+            }
+            else if (!check.AtOrAboveLimit)
+            {
+                _logger.LogInformation("March wait: exiting wait (below limit).");
                 await RecoverToWorldMapAsync(context, cancellationToken);
                 return;
             }
+            else
+            {
+                _logger.LogInformation("March wait: continuing wait (full).");
+            }
 
-            _logger.LogInformation("March slot still busy. Waiting before next probe.");
             await RecoverToWorldMapAsync(context, cancellationToken);
             await RandomDelayAsync(8_000, 14_000, cancellationToken);
         }
@@ -1226,14 +1245,22 @@ public sealed class ResourceGatherTask : IBotTask
             var x = resourceTile.CenterX + dx;
             var y = resourceTile.CenterY + dy;
 
-            await TapWithOffsetAsync(context, x, y, "resource-probe", cancellationToken);
+            var beforeTap = await CaptureContextAsync(context, cancellationToken);
+            await TapWithOffsetAsync(beforeTap, x, y, "resource-probe", cancellationToken);
             _logger.LogInformation(
                 "Resource probe tap at ({X},{Y}) base=({BaseX},{BaseY}) confidence={Confidence:F3}",
                 x, y, resourceTile.CenterX, resourceTile.CenterY, resourceTile.Confidence);
 
             await RandomDelayAsync(320, 680, cancellationToken);
+            var afterTap = await CaptureContextAsync(beforeTap, cancellationToken);
+            if (!DidScreenChangeAfterInteraction(beforeTap.ScreenshotPath, afterTap.ScreenshotPath))
+            {
+                _logger.LogInformation(
+                    "Resource probe produced no significant screen change; skipping popup checks for this probe.");
+                continue;
+            }
 
-            var popupState = await WaitForPopupStateAsync(context, TimeSpan.FromSeconds(2.8), cancellationToken);
+            var popupState = await WaitForPopupStateAsync(afterTap, TimeSpan.FromSeconds(2.8), cancellationToken);
             if (popupState == GameState.ResourcePopup)
             {
                 _logger.LogInformation("Resource popup opened after probe tap.");
@@ -1249,6 +1276,51 @@ public sealed class ResourceGatherTask : IBotTask
         }
 
         return false;
+    }
+
+    private bool DidScreenChangeAfterInteraction(string beforeScreenshotPath, string afterScreenshotPath)
+    {
+        try
+        {
+            using var before = Cv2.ImRead(beforeScreenshotPath, ImreadModes.Grayscale);
+            using var after = Cv2.ImRead(afterScreenshotPath, ImreadModes.Grayscale);
+            if (before.Empty() || after.Empty())
+            {
+                return true;
+            }
+
+            var width = Math.Min(before.Width, after.Width);
+            var height = Math.Min(before.Height, after.Height);
+            if (width <= 2 || height <= 2)
+            {
+                return true;
+            }
+
+            using var beforeRoi = new Mat(before, new Rect(0, 0, width, height));
+            using var afterRoi = new Mat(after, new Rect(0, 0, width, height));
+            using var diff = new Mat();
+            Cv2.Absdiff(beforeRoi, afterRoi, diff);
+
+            var meanDiff = Cv2.Mean(diff).Val0;
+
+            using var threshold = new Mat();
+            Cv2.Threshold(diff, threshold, 12, 255, ThresholdTypes.Binary);
+            var changedPixelCount = Cv2.CountNonZero(threshold);
+            var changedRatio = changedPixelCount / (double)(width * height);
+
+            var changed = meanDiff >= MinFrameMeanDiffAfterTap || changedRatio >= MinFrameChangedPixelRatioAfterTap;
+            _logger.LogInformation(
+                "Frame delta after interaction: changed={Changed} meanDiff={MeanDiff:F3} changedRatio={ChangedRatio:P3}",
+                changed,
+                meanDiff,
+                changedRatio);
+            return changed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Frame-delta comparison failed; allowing popup checks to proceed.");
+            return true;
+        }
     }
 
     private async Task<GameState> WaitForPopupStateAsync(

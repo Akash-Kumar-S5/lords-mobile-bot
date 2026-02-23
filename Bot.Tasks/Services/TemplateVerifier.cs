@@ -8,7 +8,7 @@ public sealed class TemplateVerifier : ITemplateVerifier
     private static readonly IReadOnlyList<string[]> RequiredTemplateGroups =
     [
         ["map_button.png"],
-        ["resource_tile.png"],
+        ["resource_stone.png", "resource_wood.png", "resource_ore.png", "resource_food.png", "resource_rune.png"],
         ["gather_button.png"],
         ["clear_section_button.png"],
         ["deploy_button.png"]

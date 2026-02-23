@@ -11,13 +11,15 @@ public sealed class StateResolver : IStateResolver
 {
     private static readonly string[] ResourceTemplates =
     {
-        "resource_tile.png",
         "resource_stone.png",
         "resource_wood.png",
         "resource_ore.png",
         "resource_food.png",
         "resource_rune.png"
     };
+
+    private const string WorldMapCastleTemplate = "castle.png";
+    private const double WorldMapCastleThreshold = 0.60;
 
     private static readonly string[] GatherTemplates =
     {
@@ -83,6 +85,38 @@ public sealed class StateResolver : IStateResolver
 
     public async Task<bool> IsWorldMapAsync(BotExecutionContext context, CancellationToken cancellationToken = default)
     {
+        var castleTemplatePath = Path.Combine(context.TemplateRoot, WorldMapCastleTemplate);
+        if (File.Exists(castleTemplatePath))
+        {
+            // World-map castle icon is expected in bottom-left area.
+            var (roiX, roiY, roiW, roiH) = GetBottomLeftWorldMapRoi(context, cancellationToken);
+            var castleDetection = await _imageDetector.FindTemplateInRegionAsync(
+                context.ScreenshotPath,
+                castleTemplatePath,
+                roiX,
+                roiY,
+                roiW,
+                roiH,
+                WorldMapCastleThreshold,
+                cancellationToken);
+
+            _logger.LogDebug(
+                "World-map castle detection match={Match} confidence={Confidence:F3} center=({X},{Y}) roi=({RX},{RY},{RW},{RH})",
+                castleDetection.IsMatch,
+                castleDetection.Confidence,
+                castleDetection.CenterX,
+                castleDetection.CenterY,
+                roiX,
+                roiY,
+                roiW,
+                roiH);
+
+            if (castleDetection.IsMatch)
+            {
+                return true;
+            }
+        }
+
         var detection = await DetectAnyAsync(context, ResourceTemplates, 0.55, cancellationToken);
         return detection.IsMatch;
     }
@@ -150,5 +184,26 @@ public sealed class StateResolver : IStateResolver
             detection.Confidence);
 
         return detection;
+    }
+
+    private static (int X, int Y, int W, int H) GetBottomLeftWorldMapRoi(
+        BotExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        using var screenshot = OpenCvSharp.Cv2.ImRead(context.ScreenshotPath, OpenCvSharp.ImreadModes.Grayscale);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!screenshot.Empty())
+        {
+            var width = screenshot.Width;
+            var height = screenshot.Height;
+            var x = 0;
+            var y = (int)(height * 0.60);
+            var w = Math.Max(64, (int)(width * 0.24));
+            var h = Math.Max(64, height - y);
+            return (x, y, Math.Min(w, width), Math.Min(h, height - y));
+        }
+
+        // Safe fallback ROI if screenshot probing fails.
+        return (0, 480, 420, 420);
     }
 }
