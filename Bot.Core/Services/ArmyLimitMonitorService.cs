@@ -118,7 +118,7 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
 
         if (!indicator.IsMatch)
         {
-            if (SaveArmyMonitorDebugAlways)
+            if (ManualDetectionSettings.EnableArmyOcrDebug && SaveArmyMonitorDebugAlways)
             {
                 await SaveArmyMonitorDebugAsync(
                     context,
@@ -161,7 +161,7 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
             if (manualValue is >= 0 and <= 9)
             {
                 var atOrAbove = manualValue.Value >= limit;
-                if (SaveArmyMonitorDebugAlways)
+                if (ManualDetectionSettings.EnableArmyOcrDebug && SaveArmyMonitorDebugAlways)
                 {
                     await SaveArmyMonitorDebugAsync(
                         context,
@@ -191,14 +191,17 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
                 manualRect.Y,
                 manualRect.W,
                 manualRect.H);
-            await SaveArmyMonitorDebugAsync(
-                context,
-                "manual-ocr-parse-failed",
-                TryGetManualArmyIndicatorGateBounds(width, height, out var gateRectForFail) ? gateRectForFail : null,
-                indicator,
-                manualRect,
-                manualValue,
-                cancellationToken);
+            if (ManualDetectionSettings.EnableArmyOcrDebug)
+            {
+                await SaveArmyMonitorDebugAsync(
+                    context,
+                    "manual-ocr-parse-failed",
+                    TryGetManualArmyIndicatorGateBounds(width, height, out var gateRectForFail) ? gateRectForFail : null,
+                    indicator,
+                    manualRect,
+                    manualValue,
+                    cancellationToken);
+            }
             return new ArmyLimitCheckResult(false, null, limit, false, "Manual OCR parse failed");
         }
 
@@ -217,7 +220,7 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
             if (value is >= 0 and <= 9)
             {
                 var atOrAbove = value.Value >= limit;
-                if (SaveArmyMonitorDebugAlways)
+                if (ManualDetectionSettings.EnableArmyOcrDebug && SaveArmyMonitorDebugAlways)
                 {
                     var dynamicRect = (x, y, w, h);
                     await SaveArmyMonitorDebugAsync(
@@ -240,14 +243,17 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
         }
 
         _logger.LogInformation("Army monitor check unreadable: OCR parse failed.");
-        await SaveArmyMonitorDebugAsync(
-            context,
-            "dynamic-ocr-parse-failed",
-            TryGetManualArmyIndicatorGateBounds(width, height, out var gateRectForDynamicFail) ? gateRectForDynamicFail : null,
-            indicator,
-            null,
-            null,
-            cancellationToken);
+        if (ManualDetectionSettings.EnableArmyOcrDebug)
+        {
+            await SaveArmyMonitorDebugAsync(
+                context,
+                "dynamic-ocr-parse-failed",
+                TryGetManualArmyIndicatorGateBounds(width, height, out var gateRectForDynamicFail) ? gateRectForDynamicFail : null,
+                indicator,
+                null,
+                null,
+                cancellationToken);
+        }
         return new ArmyLimitCheckResult(false, null, limit, false, "OCR parse failed");
     }
 

@@ -12,10 +12,15 @@ public sealed class StateResolver : IStateResolver
     private static readonly string[] ResourceTemplates =
     {
         "resource_stone.png",
+        "resource_stone_1.png",
         "resource_wood.png",
+        "resource_wood_1.png",
         "resource_ore.png",
+        "resource_ore_1.png",
         "resource_food.png",
-        "resource_rune.png"
+        "resource_food_1.png",
+        "resource_rune.png",
+        "resource_rune_1.png"
     };
 
     private const string WorldMapCastleTemplate = "castle.png";

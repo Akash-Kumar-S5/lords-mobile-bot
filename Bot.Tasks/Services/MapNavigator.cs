@@ -1,6 +1,8 @@
 using Bot.Core.Interfaces;
 using Bot.Core.Models;
+using Bot.Core.Configuration;
 using Bot.Emulator.Interfaces;
+using Bot.Infrastructure.Configuration;
 using Bot.Tasks.Interfaces;
 using Bot.Vision.Interfaces;
 using Bot.Vision.Models;
@@ -11,15 +13,6 @@ namespace Bot.Tasks.Services;
 
 public sealed class MapNavigator : IMapNavigator
 {
-    private static readonly string[] ResourceTemplates =
-    {
-        "resource_stone.png",
-        "resource_wood.png",
-        "resource_ore.png",
-        "resource_food.png",
-        "resource_rune.png"
-    };
-
     private static readonly double[] ResourceThresholds = { 0.76, 0.68, 0.60, 0.52, 0.45 };
     private static readonly bool SaveClickDebug = !string.Equals(
         Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
@@ -29,18 +22,22 @@ public sealed class MapNavigator : IMapNavigator
     private readonly IEmulatorController _emulatorController;
     private readonly IImageDetector _imageDetector;
     private readonly IStateResolver _stateResolver;
+    private readonly IRuntimeBotSettings _runtimeBotSettings;
     private readonly ILogger<MapNavigator> _logger;
     private readonly Random _random = Random.Shared;
+    private static bool NormalClickLogsEnabled => ManualDetectionSettings.EnableNormalClickLogs;
 
     public MapNavigator(
         IEmulatorController emulatorController,
         IImageDetector imageDetector,
         IStateResolver stateResolver,
+        IRuntimeBotSettings runtimeBotSettings,
         ILogger<MapNavigator> logger)
     {
         _emulatorController = emulatorController;
         _imageDetector = imageDetector;
         _stateResolver = stateResolver;
+        _runtimeBotSettings = runtimeBotSettings;
         _logger = logger;
     }
 
@@ -86,15 +83,29 @@ public sealed class MapNavigator : IMapNavigator
         var endY = (int)(height * NextRatio(0.2, 0.8));
 
         await _emulatorController.SwipeAsync(startX, startY, endX, endY, _random.Next(240, 420), cancellationToken);
-        _logger.LogInformation("Map pan executed: ({StartX},{StartY}) -> ({EndX},{EndY})", startX, startY, endX, endY);
+        if (NormalClickLogsEnabled)
+        {
+            _logger.LogInformation("Map pan executed: ({StartX},{StartY}) -> ({EndX},{EndY})", startX, startY, endX, endY);
+        }
+        else
+        {
+            _logger.LogDebug("Map pan executed: ({StartX},{StartY}) -> ({EndX},{EndY})", startX, startY, endX, endY);
+        }
     }
 
     public async Task<DetectionResult> FindResourceTileAsync(BotExecutionContext context, CancellationToken cancellationToken = default)
     {
         var result = DetectionResult.NotFound;
         string? pickedTemplate = null;
+        var templates = GetEnabledResourceTemplates();
 
-        foreach (var template in ResourceTemplates)
+        if (templates.Count == 0)
+        {
+            _logger.LogWarning("No resource types are enabled in settings. Skipping resource search.");
+            return DetectionResult.NotFound;
+        }
+
+        foreach (var template in templates)
         {
             foreach (var threshold in ResourceThresholds)
             {
@@ -129,6 +140,42 @@ public sealed class MapNavigator : IMapNavigator
             result.CenterX,
             result.CenterY);
         return result;
+    }
+
+    private IReadOnlyList<string> GetEnabledResourceTemplates()
+    {
+        var templates = new List<string>(10);
+        if (_runtimeBotSettings.SearchStone)
+        {
+            templates.Add("resource_stone.png");
+            templates.Add("resource_stone_1.png");
+        }
+
+        if (_runtimeBotSettings.SearchWood)
+        {
+            templates.Add("resource_wood.png");
+            templates.Add("resource_wood_1.png");
+        }
+
+        if (_runtimeBotSettings.SearchOre)
+        {
+            templates.Add("resource_ore.png");
+            templates.Add("resource_ore_1.png");
+        }
+
+        if (_runtimeBotSettings.SearchFood)
+        {
+            templates.Add("resource_food.png");
+            templates.Add("resource_food_1.png");
+        }
+
+        if (_runtimeBotSettings.SearchRune)
+        {
+            templates.Add("resource_rune.png");
+            templates.Add("resource_rune_1.png");
+        }
+
+        return templates;
     }
 
     private async Task<DetectionResult> DetectAsync(
@@ -254,7 +301,14 @@ public sealed class MapNavigator : IMapNavigator
                 Cv2.ImWrite(outputPath, screenshot);
             }
 
-            _logger.LogInformation("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+            if (NormalClickLogsEnabled)
+            {
+                _logger.LogInformation("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+            }
+            else
+            {
+                _logger.LogDebug("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+            }
         }
         catch (Exception ex)
         {

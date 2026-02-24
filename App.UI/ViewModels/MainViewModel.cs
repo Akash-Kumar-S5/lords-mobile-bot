@@ -20,9 +20,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IRuntimeBotSettings _runtimeBotSettings;
     private readonly ITaskSchedulerService _taskSchedulerService;
     private readonly IBotModeController _modeController;
-    private readonly DispatcherQueue _dispatcherQueue;
+    private readonly DispatcherQueue? _dispatcherQueue;
     private string _statusText = "Stopped";
     private string _maxArmyLimitText = "1";
+    private bool _searchStone;
+    private bool _searchWood;
+    private bool _searchOre;
+    private bool _searchFood;
+    private bool _searchRune;
 
     public MainViewModel(
         IBotEngine botEngine,
@@ -38,8 +43,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _runtimeBotSettings = runtimeBotSettings;
         _taskSchedulerService = taskSchedulerService;
         _modeController = modeController;
-        _dispatcherQueue = DispatcherQueue.GetForCurrentThread() ?? throw new InvalidOperationException("UI dispatcher unavailable.");
+        _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
         _maxArmyLimitText = _runtimeBotSettings.MaxActiveMarches.ToString();
+        _searchStone = _runtimeBotSettings.SearchStone;
+        _searchWood = _runtimeBotSettings.SearchWood;
+        _searchOre = _runtimeBotSettings.SearchOre;
+        _searchFood = _runtimeBotSettings.SearchFood;
+        _searchRune = _runtimeBotSettings.SearchRune;
 
         LogEntries = new ObservableCollection<string>(_logEventStream.Snapshot());
         _logEventStream.LogAppended += OnLogAppended;
@@ -88,6 +98,66 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public bool SearchStone
+    {
+        get => _searchStone;
+        set
+        {
+            if (_searchStone == value) return;
+            _searchStone = value;
+            _runtimeBotSettings.SearchStone = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool SearchWood
+    {
+        get => _searchWood;
+        set
+        {
+            if (_searchWood == value) return;
+            _searchWood = value;
+            _runtimeBotSettings.SearchWood = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool SearchOre
+    {
+        get => _searchOre;
+        set
+        {
+            if (_searchOre == value) return;
+            _searchOre = value;
+            _runtimeBotSettings.SearchOre = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool SearchFood
+    {
+        get => _searchFood;
+        set
+        {
+            if (_searchFood == value) return;
+            _searchFood = value;
+            _runtimeBotSettings.SearchFood = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public bool SearchRune
+    {
+        get => _searchRune;
+        set
+        {
+            if (_searchRune == value) return;
+            _searchRune = value;
+            _runtimeBotSettings.SearchRune = value;
+            OnPropertyChanged();
+        }
+    }
+
     private async Task StartAsync()
     {
         if (!int.TryParse(MaxArmyLimitText, out var maxArmyLimit) || maxArmyLimit < 1)
@@ -98,6 +168,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         _runtimeBotSettings.MaxActiveMarches = maxArmyLimit;
+        _runtimeBotSettings.SearchStone = SearchStone;
+        _runtimeBotSettings.SearchWood = SearchWood;
+        _runtimeBotSettings.SearchOre = SearchOre;
+        _runtimeBotSettings.SearchFood = SearchFood;
+        _runtimeBotSettings.SearchRune = SearchRune;
 
         var verify = await _templateVerifier.VerifyAsync();
         if (!verify.IsValid)
@@ -147,11 +222,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnLogAppended(string message)
     {
+        if (_dispatcherQueue is null)
+        {
+            LogEntries.Add(message);
+            return;
+        }
+
         _ = _dispatcherQueue.TryEnqueue(() => LogEntries.Add(message));
     }
 
     private void OnModeChanged(BotRunMode _, string __)
     {
+        if (_dispatcherQueue is null)
+        {
+            StatusText = BuildStatusText();
+            RefreshCommands();
+            return;
+        }
+
         var _queued = _dispatcherQueue.TryEnqueue(() =>
         {
             StatusText = BuildStatusText();
@@ -161,6 +249,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnSchedulerStateChanged()
     {
+        if (_dispatcherQueue is null)
+        {
+            StatusText = BuildStatusText();
+            RefreshCommands();
+            return;
+        }
+
         _ = _dispatcherQueue.TryEnqueue(() =>
         {
             StatusText = BuildStatusText();

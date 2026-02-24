@@ -4,27 +4,53 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    xmlns:vm="using:App.UI.ViewModels"
     mc:Ignorable="d"
     Title="Lords Mobile Bot Dashboard">
+    <Grid x:Name="RootGrid" Padding="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
 
-    <Grid x:Name="RootGrid" Padding="16" RowDefinitions="Auto,Auto,*" RowSpacing="12">
         <TextBlock Text="Lords Bot Control Center" FontSize="24" FontWeight="SemiBold" />
 
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-            <Button Content="Start Bot" Command="{Binding StartCommand}" />
-            <Button Content="Stop Bot" Command="{Binding StopCommand}" />
-            <Button Content="Check Army Limit" Command="{Binding CheckArmyLimitCommand}" />
-            <TextBlock Text="Max Army:" VerticalAlignment="Center" Margin="12,0,0,0" />
-            <TextBox Text="{Binding MaxArmyLimitText, Mode=TwoWay}" Width="60" />
-            <TextBlock Text="Status:" VerticalAlignment="Center" Margin="12,0,0,0" />
-            <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" FontWeight="SemiBold" />
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,12,0,8">
+            <Button MinWidth="110" Content="Start Bot" Command="{Binding StartCommand}" />
+            <Button MinWidth="110" Content="Stop Bot" Command="{Binding StopCommand}" />
+            <Button MinWidth="140" Content="Check Army Limit" Command="{Binding CheckArmyLimitCommand}" />
+            <TextBlock VerticalAlignment="Center" Text="{Binding StatusText}" Margin="8,0,0,0" FontWeight="SemiBold" />
         </StackPanel>
 
-        <Border Grid.Row="2" BorderThickness="1" Padding="8" CornerRadius="4">
-            <ScrollViewer x:Name="LogsScrollViewer">
-                <ItemsControl ItemsSource="{Binding LogEntries}" />
-            </ScrollViewer>
+        <Border Grid.Row="2" Padding="10" BorderThickness="1" CornerRadius="8">
+            <StackPanel Spacing="10">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock Text="Max Army Limit" VerticalAlignment="Center" />
+                    <TextBox Width="80" Text="{Binding MaxArmyLimitText, Mode=TwoWay}" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <CheckBox Content="Stone" IsChecked="{Binding SearchStone, Mode=TwoWay}" />
+                    <CheckBox Content="Wood" IsChecked="{Binding SearchWood, Mode=TwoWay}" />
+                    <CheckBox Content="Ore" IsChecked="{Binding SearchOre, Mode=TwoWay}" />
+                    <CheckBox Content="Food" IsChecked="{Binding SearchFood, Mode=TwoWay}" />
+                    <CheckBox Content="Rune" IsChecked="{Binding SearchRune, Mode=TwoWay}" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="3" Padding="10" BorderThickness="1" CornerRadius="8" Margin="0,12,0,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock Text="Live Logs" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <ScrollViewer x:Name="LogsScrollViewer" Grid.Row="1">
+                    <ItemsControl ItemsSource="{Binding LogEntries}" />
+                </ScrollViewer>
+            </Grid>
         </Border>
     </Grid>
 </Window>

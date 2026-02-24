@@ -4,6 +4,13 @@ namespace Bot.Tasks.Configuration;
 
 public static class ManualClickPoints
 {
+    // When false, no army OCR debug images/meta/log entries are written.
+    public static bool EnableArmyOcrDebug
+    {
+        get => ManualDetectionSettings.EnableArmyOcrDebug;
+        set => ManualDetectionSettings.EnableArmyOcrDebug = value;
+    }
+
     // Set true to force march-screen clicks to use the coordinates below.
     public static bool UseManualCoordinates = true;
 

@@ -11,6 +11,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Bot.Infrastructure\Bot.Infrastructure.csproj" />
     <ProjectReference Include="..\Bot.Core\Bot.Core.csproj" />
     <ProjectReference Include="..\Bot.Emulator\Bot.Emulator.csproj" />
     <ProjectReference Include="..\Bot.Vision\Bot.Vision.csproj" />

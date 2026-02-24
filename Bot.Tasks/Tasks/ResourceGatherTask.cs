@@ -1,6 +1,7 @@
 using Bot.Core.Enums;
 using Bot.Core.Interfaces;
 using Bot.Core.Models;
+using Bot.Core.Configuration;
 using Bot.Emulator.Interfaces;
 using Bot.Infrastructure.Configuration;
 using Bot.Tasks.Interfaces;
@@ -70,6 +71,7 @@ public sealed class ResourceGatherTask : IBotTask
         Environment.GetEnvironmentVariable("BOT_SAVE_CLICK_DEBUG"),
         "0",
         StringComparison.OrdinalIgnoreCase);
+    private static bool NormalClickLogsEnabled => ManualDetectionSettings.EnableNormalClickLogs;
 
     private const int StepTimeoutSeconds = 45;
     private const double MinFrameMeanDiffAfterTap = 0.65;
@@ -1106,7 +1108,9 @@ public sealed class ResourceGatherTask : IBotTask
             }
             else
             {
-                _logger.LogInformation("March wait: continuing wait (full).");
+                _logger.LogInformation("March wait: full limit reached. Switching to ArmyMonitor pause mode.");
+                _modeController.EnterArmyMonitor("Army limit reached during march wait");
+                return;
             }
 
             await RecoverToWorldMapAsync(context, cancellationToken);
@@ -1247,9 +1251,26 @@ public sealed class ResourceGatherTask : IBotTask
 
             var beforeTap = await CaptureContextAsync(context, cancellationToken);
             await TapWithOffsetAsync(beforeTap, x, y, "resource-probe", cancellationToken);
-            _logger.LogInformation(
-                "Resource probe tap at ({X},{Y}) base=({BaseX},{BaseY}) confidence={Confidence:F3}",
-                x, y, resourceTile.CenterX, resourceTile.CenterY, resourceTile.Confidence);
+            if (NormalClickLogsEnabled)
+            {
+                _logger.LogInformation(
+                    "Resource probe tap at ({X},{Y}) base=({BaseX},{BaseY}) confidence={Confidence:F3}",
+                    x,
+                    y,
+                    resourceTile.CenterX,
+                    resourceTile.CenterY,
+                    resourceTile.Confidence);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Resource probe tap at ({X},{Y}) base=({BaseX},{BaseY}) confidence={Confidence:F3}",
+                    x,
+                    y,
+                    resourceTile.CenterX,
+                    resourceTile.CenterY,
+                    resourceTile.Confidence);
+            }
 
             await RandomDelayAsync(320, 680, cancellationToken);
             var afterTap = await CaptureContextAsync(beforeTap, cancellationToken);
@@ -1309,11 +1330,22 @@ public sealed class ResourceGatherTask : IBotTask
             var changedRatio = changedPixelCount / (double)(width * height);
 
             var changed = meanDiff >= MinFrameMeanDiffAfterTap || changedRatio >= MinFrameChangedPixelRatioAfterTap;
-            _logger.LogInformation(
-                "Frame delta after interaction: changed={Changed} meanDiff={MeanDiff:F3} changedRatio={ChangedRatio:P3}",
-                changed,
-                meanDiff,
-                changedRatio);
+            if (NormalClickLogsEnabled)
+            {
+                _logger.LogInformation(
+                    "Frame delta after interaction: changed={Changed} meanDiff={MeanDiff:F3} changedRatio={ChangedRatio:P3}",
+                    changed,
+                    meanDiff,
+                    changedRatio);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "Frame delta after interaction: changed={Changed} meanDiff={MeanDiff:F3} changedRatio={ChangedRatio:P3}",
+                    changed,
+                    meanDiff,
+                    changedRatio);
+            }
             return changed;
         }
         catch (Exception ex)
@@ -1561,7 +1593,14 @@ public sealed class ResourceGatherTask : IBotTask
                 Cv2.ImWrite(outputPath, screenshot);
             }
 
-            _logger.LogInformation("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+            if (NormalClickLogsEnabled)
+            {
+                _logger.LogInformation("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+            }
+            else
+            {
+                _logger.LogDebug("Saved click debug frame: reason={Reason} tap=({X},{Y})", reason, tapX, tapY);
+            }
         }
         catch (Exception ex)
         {

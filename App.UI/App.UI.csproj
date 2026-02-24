@@ -11,10 +11,6 @@
     <WindowsPackageType>None</WindowsPackageType>
     <AppxPackage>false</AppxPackage>
     <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
-    <GenerateProjectPriFile>false</GenerateProjectPriFile>
-    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
-    <AppxGeneratePrisForPortableLibrariesEnabled>false</AppxGeneratePrisForPortableLibrariesEnabled>
-    <IncludeProjectPriFile>false</IncludeProjectPriFile>
     <AppxMSBuildToolsPath Condition="'$(WINUI_APPX_TOOLS_PATH)' != '' and Exists('$(WINUI_APPX_TOOLS_PATH)\\Microsoft.Build.AppxPackage.dll')">$(WINUI_APPX_TOOLS_PATH)\</AppxMSBuildToolsPath>
     <AppxMSBuildToolsPath Condition="'$(AppxMSBuildToolsPath)' == '' and Exists('D:\\VS\\Extract\\WindowsBuild\\Contents\\MSBuild\\Microsoft\\VisualStudio\\v17.0\\AppxPackage\\Microsoft.Build.AppxPackage.dll')">D:\VS\Extract\WindowsBuild\Contents\MSBuild\Microsoft\VisualStudio\v17.0\AppxPackage\</AppxMSBuildToolsPath>
   </PropertyGroup>

@@ -2,15 +2,21 @@ namespace Bot.Core.Configuration;
 
 public static class ManualDetectionSettings
 {
+    // Controls high-frequency click/action logs (tap points, map pans, probe taps).
+    // Keep false for long-running stability to avoid very large log files.
+    public static bool EnableNormalClickLogs { get; set; } = false;
+
+    public static bool EnableArmyOcrDebug { get; set; } = false;
+
     public static bool UseManualArmyOcrRegion { get; set; } = true;
-    public static int ArmyOcrX1 { get; set; } = 69;
-    public static int ArmyOcrY1 { get; set; } = 340;
-    public static int ArmyOcrX2 { get; set; } = 72;
-    public static int ArmyOcrY2 { get; set; } = 371;
-    public static int ArmyOcrX3 { get; set; } = 116;
+    public static int ArmyOcrX1 { get; set; } = 72;
+    public static int ArmyOcrY1 { get; set; } = 342;
+    public static int ArmyOcrX2 { get; set; } = 100;
+    public static int ArmyOcrY2 { get; set; } = 341;
+    public static int ArmyOcrX3 { get; set; } = 99;
     public static int ArmyOcrY3 { get; set; } = 368;
-    public static int ArmyOcrX4 { get; set; } = 113;
-    public static int ArmyOcrY4 { get; set; } = 334;
+    public static int ArmyOcrX4 { get; set; } = 70;
+    public static int ArmyOcrY4 { get; set; } = 368;
 
     public static bool UseManualArmyIndicatorGateRegion { get; set; } = true;
     public static double ArmyIndicatorGateMinConfidence { get; set; } = 0.50;
