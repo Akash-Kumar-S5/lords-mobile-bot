@@ -15,6 +15,13 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.1" />
   </ItemGroup>
 
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX'))">
+    <None Include="runtimes/osx/native/libOpenCvSharpExtern.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>runtimes/osx/native/libOpenCvSharpExtern.dylib</TargetPath>
+    </None>
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Bot.Core\Bot.Core.csproj" />
     <ProjectReference Include="..\Bot.Infrastructure\Bot.Infrastructure.csproj" />

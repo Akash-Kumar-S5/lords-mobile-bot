@@ -147,6 +147,23 @@ public sealed class AdbService : IEmulatorController
             return ldPlayerAdb;
         }
 
+        // Common macOS locations (Homebrew, Android SDK)
+        string[] macPaths =
+        [
+            "/opt/homebrew/bin/adb",
+            "/usr/local/bin/adb",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Android", "sdk", "platform-tools", "adb"),
+        ];
+
+        foreach (var path in macPaths)
+        {
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+
         return "adb";
     }
 }
