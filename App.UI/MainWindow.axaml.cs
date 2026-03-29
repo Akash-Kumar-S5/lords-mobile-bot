@@ -1,18 +1,22 @@
 using App.UI.ViewModels;
-using Microsoft.UI.Xaml;
+using Avalonia.Controls;
+using Microsoft.Extensions.DependencyInjection;
+using Avalonia.Threading;
 using System.Collections.Specialized;
 
 namespace App.UI;
 
-public sealed partial class MainWindow : Window
+public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel;
+
+    public MainWindow() : this(App.Services.GetRequiredService<MainViewModel>()) { }
 
     public MainWindow(MainViewModel viewModel)
     {
         InitializeComponent();
         _viewModel = viewModel;
-        RootGrid.DataContext = viewModel;
+        DataContext = viewModel;
         _viewModel.LogEntries.CollectionChanged += OnLogEntriesChanged;
         Closed += OnClosed;
     }
@@ -24,13 +28,13 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        _ = DispatcherQueue.TryEnqueue(() =>
+        Dispatcher.UIThread.Post(() =>
         {
-            LogsScrollViewer.ChangeView(null, LogsScrollViewer.ScrollableHeight, null, true);
+            LogsScrollViewer.Offset = new Avalonia.Vector(LogsScrollViewer.Offset.X, double.MaxValue);
         });
     }
 
-    private void OnClosed(object sender, WindowEventArgs args)
+    private void OnClosed(object? sender, EventArgs args)
     {
         _viewModel.LogEntries.CollectionChanged -= OnLogEntriesChanged;
         Closed -= OnClosed;

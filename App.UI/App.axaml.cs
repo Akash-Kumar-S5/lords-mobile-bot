@@ -1,4 +1,7 @@
 using App.UI.ViewModels;
+using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Markup.Xaml;
 using Bot.Core.Interfaces;
 using Bot.Core.Services;
 using Bot.Emulator.Interfaces;
@@ -11,7 +14,6 @@ using Bot.Tasks.Tasks;
 using Bot.Vision.Interfaces;
 using Bot.Vision.Services;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.UI.Xaml;
 
 namespace App.UI;
 
@@ -19,16 +21,19 @@ public partial class App : Application
 {
     public static IServiceProvider Services { get; private set; } = default!;
 
-    public App()
+    public override void Initialize()
     {
-        InitializeComponent();
         Services = ConfigureServices();
+        AvaloniaXamlLoader.Load(this);
     }
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    public override void OnFrameworkInitializationCompleted()
     {
-        var mainWindow = Services.GetRequiredService<MainWindow>();
-        mainWindow.Activate();
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.MainWindow = Services.GetRequiredService<MainWindow>();
+        }
+        base.OnFrameworkInitializationCompleted();
     }
 
     private static IServiceProvider ConfigureServices()

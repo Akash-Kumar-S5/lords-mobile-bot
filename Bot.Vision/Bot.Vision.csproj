@@ -7,9 +7,13 @@
 
   <ItemGroup>
     <PackageReference Include="OpenCvSharp4" Version="4.10.0.20240616" />
-    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20240616" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
   </ItemGroup>
+
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20240616" />
+  </ItemGroup>
+
 
   <ItemGroup>
     <ProjectReference Include="..\Bot.Infrastructure\Bot.Infrastructure.csproj" />

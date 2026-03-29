@@ -4,7 +4,7 @@ using Bot.Core.Interfaces;
 using Bot.Infrastructure.Configuration;
 using Bot.Infrastructure.Logging;
 using Bot.Tasks.Interfaces;
-using Microsoft.UI.Dispatching;
+using Avalonia.Threading;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -20,7 +20,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IRuntimeBotSettings _runtimeBotSettings;
     private readonly ITaskSchedulerService _taskSchedulerService;
     private readonly IBotModeController _modeController;
-    private readonly DispatcherQueue? _dispatcherQueue;
     private string _statusText = "Stopped";
     private string _maxArmyLimitText = "1";
     private bool _searchStone;
@@ -43,7 +42,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _runtimeBotSettings = runtimeBotSettings;
         _taskSchedulerService = taskSchedulerService;
         _modeController = modeController;
-        _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
         _maxArmyLimitText = _runtimeBotSettings.MaxActiveMarches.ToString();
         _searchStone = _runtimeBotSettings.SearchStone;
         _searchWood = _runtimeBotSettings.SearchWood;
@@ -222,25 +220,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnLogAppended(string message)
     {
-        if (_dispatcherQueue is null)
-        {
-            LogEntries.Add(message);
-            return;
-        }
-
-        _ = _dispatcherQueue.TryEnqueue(() => LogEntries.Add(message));
+        Dispatcher.UIThread.Post(() => LogEntries.Add(message));
     }
 
     private void OnModeChanged(BotRunMode _, string __)
     {
-        if (_dispatcherQueue is null)
-        {
-            StatusText = BuildStatusText();
-            RefreshCommands();
-            return;
-        }
-
-        var _queued = _dispatcherQueue.TryEnqueue(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             StatusText = BuildStatusText();
             RefreshCommands();
@@ -249,14 +234,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnSchedulerStateChanged()
     {
-        if (_dispatcherQueue is null)
-        {
-            StatusText = BuildStatusText();
-            RefreshCommands();
-            return;
-        }
-
-        _ = _dispatcherQueue.TryEnqueue(() =>
+        Dispatcher.UIThread.Post(() =>
         {
             StatusText = BuildStatusText();
             RefreshCommands();

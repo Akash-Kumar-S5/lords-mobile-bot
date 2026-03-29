@@ -1,12 +1,13 @@
-<Window
-    x:Class="App.UI.MainWindow"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d"
-    Title="Lords Mobile Bot Dashboard">
-    <Grid x:Name="RootGrid" Padding="16">
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        x:Class="App.UI.MainWindow"
+        Title="Lords Mobile Bot Dashboard"
+        Width="700"
+        Height="600">
+    <Grid x:Name="RootGrid" Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -48,7 +49,13 @@
                 </Grid.RowDefinitions>
                 <TextBlock Text="Live Logs" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <ScrollViewer x:Name="LogsScrollViewer" Grid.Row="1">
-                    <ItemsControl ItemsSource="{Binding LogEntries}" />
+                    <ItemsControl ItemsSource="{Binding LogEntries}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding}" TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
                 </ScrollViewer>
             </Grid>
         </Border>
