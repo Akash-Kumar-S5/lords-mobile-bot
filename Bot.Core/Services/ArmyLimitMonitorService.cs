@@ -17,10 +17,7 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
     private static readonly double[] ArmyIndicatorThresholds = { 0.90, 0.85, 0.80, 0.75, 0.70 };
     private const double PopupCloseMinConfidence = 0.75;
     private const int MaxCloseAttempts = 3;
-    private static readonly bool SaveArmyMonitorDebugAlways = string.Equals(
-        Environment.GetEnvironmentVariable("BOT_SAVE_ARMY_MONITOR_DEBUG_ALWAYS"),
-        "1",
-        StringComparison.OrdinalIgnoreCase);
+    private static bool SaveArmyMonitorDebugAlways => ManualDetectionSettings.SaveDebugAlways;
 
     private readonly IEmulatorController _emulator;
     private readonly IStateResolver _stateResolver;
@@ -269,6 +266,11 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
                 return DetectionResult.NotFound;
             }
 
+            if (ManualDetectionSettings.SaveDebugAlways)
+            {
+                SaveArmyIndicatorRoiCrop(context.ScreenshotPath, gateRect.X, gateRect.Y, gateRect.W, gateRect.H, templatePath);
+            }
+
             var detection = await _imageDetector.FindTemplateInRegionAsync(
                 context.ScreenshotPath,
                 templatePath,
@@ -386,6 +388,48 @@ public sealed class ArmyLimitMonitorService : IArmyLimitMonitorService
 
         rect = (minX, minY, width, height);
         return true;
+    }
+
+    private void SaveArmyIndicatorRoiCrop(string screenshotPath, int roiX, int roiY, int roiW, int roiH, string templatePath)
+    {
+        try
+        {
+            using var screenshot = Cv2.ImRead(screenshotPath, ImreadModes.Color);
+            if (screenshot.Empty()) return;
+
+            var cx = Math.Clamp(roiX, 0, screenshot.Width - 1);
+            var cy = Math.Clamp(roiY, 0, screenshot.Height - 1);
+            var cw = Math.Clamp(roiW, 1, screenshot.Width - cx);
+            var ch = Math.Clamp(roiH, 1, screenshot.Height - cy);
+
+            var debugDir = Path.Combine(Directory.GetCurrentDirectory(), "logs", "debug", "army-indicator-roi");
+            Directory.CreateDirectory(debugDir);
+
+            var token = $"{DateTimeOffset.UtcNow:yyyyMMdd-HHmmssfff}";
+            var cropPath = Path.Combine(debugDir, $"crop-{token}.png");
+            var annotatedPath = Path.Combine(debugDir, $"annotated-{token}.png");
+
+            using var crop = new Mat(screenshot, new OpenCvSharp.Rect(cx, cy, cw, ch));
+            Cv2.ImWrite(cropPath, crop);
+
+            using var annotated = screenshot.Clone();
+            Cv2.Rectangle(annotated, new OpenCvSharp.Rect(cx, cy, cw, ch), new Scalar(0, 165, 255), 2);
+            Cv2.PutText(annotated, $"Army ROI ({cx},{cy},{cw},{ch})",
+                new Point(Math.Max(4, cx), Math.Max(20, cy - 6)),
+                HersheyFonts.HersheySimplex, 0.55, new Scalar(0, 165, 255), 2);
+            Cv2.ImWrite(annotatedPath, annotated);
+
+            using var tmpl = Cv2.ImRead(templatePath, ImreadModes.Color);
+            _logger.LogInformation(
+                "Army indicator ROI debug saved: roi=({X},{Y},{W},{H}) screenSize=({SW},{SH}) templateSize=({TW},{TH}) crop={Crop}",
+                cx, cy, cw, ch, screenshot.Width, screenshot.Height,
+                tmpl.Empty() ? -1 : tmpl.Width, tmpl.Empty() ? -1 : tmpl.Height,
+                cropPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to save army indicator ROI debug crop.");
+        }
     }
 
     private async Task SaveArmyMonitorDebugAsync(

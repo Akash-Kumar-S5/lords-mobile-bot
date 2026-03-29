@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "App.UI": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "BOT_SAVE_ARMY_MONITOR_DEBUG_ALWAYS": "1",
+        "BOT_TESSDATA_PATH": "/Users/akashkumars/Documents/Personal/bot/lords-mobile-bot/Bot.Vision/Tessdata",
+        "BOT_TEMPLATE_ROOT": "/Users/akashkumars/Documents/Personal/bot/lords-mobile-bot/Bot.Vision/Templates",
+        "DYLD_LIBRARY_PATH": "/opt/homebrew/lib"
+      }
+    }
+  }
+}
